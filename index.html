@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="theme-color" content="#10b981" />
+<title>MoneyMatrix</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+<link rel="manifest" href='data:application/manifest+json,{"name":"MoneyMatrix","short_name":"MoneyMatrix","start_url":".","display":"standalone","background_color":"%23f3f4f6","theme_color":"%2310b981","icons":[{"src":"data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 192 192%27%3E%3Crect width=%27192%27 height=%27192%27 rx=%2740%27 fill=%27%2310b981%27/%3E%3Ctext x=%2796%27 y=%27132%27 font-size=%27110%27 text-anchor=%27middle%27 fill=%27white%27 font-family=%27Arial%27 font-weight=%27bold%27%3E%E2%82%B9%3C/text%3E%3C/svg%3E","sizes":"192x192","type":"image/svg+xml"}]}' />
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%2310b981'/%3E%3Ctext x='96' y='132' font-size='110' text-anchor='middle' fill='white' font-family='Arial' font-weight='bold'%3E%E2%82%B9%3C/text%3E%3C/svg%3E" />
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#f3f4f6;color:#1e293b}
+  .hidden{display:none!important}
+  button{font-family:inherit;cursor:pointer;border:none}
+  input,select,textarea{font-family:inherit;font-size:16px}
+
+  /* Sidebar */
+  .sidebar{width:260px;background:#1e293b;min-height:100vh;position:fixed;left:0;top:0;color:#fff;padding:20px 0;transition:transform .3s;z-index:100}
+  .sidebar-brand{padding:0 20px 18px;border-bottom:1px solid #334155;margin-bottom:10px}
+  .sidebar-brand h1{font-size:1.4rem;font-weight:700;color:#10b981}
+  .sidebar-brand p{font-size:.72rem;color:#94a3b8;margin-top:2px}
+  .nav-item{padding:12px 20px;cursor:pointer;transition:.2s;display:flex;align-items:center;gap:12px;border-left:3px solid transparent;font-size:.95rem}
+  .nav-item:hover{background:#334155;border-left-color:#10b981}
+  .nav-item.active{background:#334155;border-left-color:#10b981;color:#10b981}
+  .nav-item i{width:20px;text-align:center}
+  .nav-divider{border-top:1px solid #334155;margin:10px 0}
+
+  .main{margin-left:260px;padding:20px;min-height:100vh}
+  .topbar{background:#fff;padding:15px 25px;border-radius:12px;display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+  .topbar h2{font-size:1.3rem;font-weight:700}
+  .topbar-right{display:flex;align-items:center;gap:10px;font-size:.85rem}
+  .pill{padding:4px 12px;border-radius:999px;font-size:.75rem;font-weight:600}
+  .pill-blue{background:#dbeafe;color:#1e40af}.pill-purple{background:#e9d5ff;color:#6b21a8}
+
+  .switcher{display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;align-items:center}
+  .switcher .lbl{font-size:.8rem;color:#6b7280;margin-right:4px}
+  .chip{padding:6px 16px;border-radius:999px;font-size:.8rem;border:2px solid #e5e7eb;background:#fff;transition:.2s;font-weight:600}
+  .chip:hover{border-color:#10b981}
+  .chip.active{background:#10b981;color:#fff;border-color:#10b981}
+
+  .card{background:#fff;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.1);margin-bottom:20px}
+  .card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;gap:10px;flex-wrap:wrap}
+  .card-title{font-size:1.05rem;font-weight:600}
+
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:20px}
+  .stat{background:#fff;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+  .stat-ic{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.25rem;margin-bottom:12px}
+  .ic-green{background:#d1fae5;color:#059669}.ic-blue{background:#dbeafe;color:#2563eb}.ic-amber{background:#fef3c7;color:#d97706}.ic-red{background:#fee2e2;color:#dc2626}.ic-purple{background:#e9d5ff;color:#7c3aed}.ic-teal{background:#ccfbf1;color:#0f766e}
+  .stat-val{font-size:1.5rem;font-weight:700}
+  .stat-lbl{font-size:.85rem;color:#6b7280;margin-top:4px}
+
+  .btn{padding:9px 16px;border-radius:8px;font-size:.875rem;font-weight:600;transition:.2s;display:inline-flex;align-items:center;gap:6px}
+  .btn-primary{background:#10b981;color:#fff}.btn-primary:hover{background:#059669}
+  .btn-blue{background:#3b82f6;color:#fff}.btn-blue:hover{background:#2563eb}
+  .btn-amber{background:#f59e0b;color:#fff}.btn-amber:hover{background:#d97706}
+  .btn-red{background:#ef4444;color:#fff}.btn-red:hover{background:#dc2626}
+  .btn-gray{background:#f3f4f6;color:#374151}.btn-gray:hover{background:#e5e7eb}
+  .btn-sm{padding:6px 12px;font-size:.78rem}
+
+  .search{width:100%;padding:10px 14px;border:1px solid #d1d5db;border-radius:8px;margin-bottom:14px}
+  .filter-row{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+  .filter-row .search{margin-bottom:0;flex:1}
+  .filter-row select{padding:10px;border:1px solid #d1d5db;border-radius:8px}
+
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:12px;text-align:left;font-size:.875rem}
+  th{background:#f8fafc;font-weight:600;color:#475569;border-bottom:2px solid #e2e8f0}
+  td{border-bottom:1px solid #e2e8f0}
+  tr:hover td{background:#f8fafc}
+  .tbl-wrap{overflow-x:auto}
+  .badge{padding:4px 10px;border-radius:999px;font-size:.72rem;font-weight:600}
+  .bg-green{background:#d1fae5;color:#065f46}.bg-amber{background:#fef3c7;color:#92400e}.bg-gray{background:#f3f4f6;color:#6b7280}
+  .empty{text-align:center;padding:40px;color:#9ca3af}
+  .empty i{font-size:2.5rem;margin-bottom:12px;display:block}
+
+  /* Login */
+  .login{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#1e293b,#0f172a);padding:20px}
+  .login-card{background:#fff;border-radius:16px;padding:40px;width:100%;max-width:420px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+  .login-logo{text-align:center;margin-bottom:26px}
+  .login-logo h1{font-size:1.9rem;color:#10b981;font-weight:700}
+  .login-logo p{color:#6b7280;font-size:.85rem;margin-top:4px}
+  .login-q{text-align:center;color:#6b7280;font-size:.85rem;margin-bottom:14px}
+  .user-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:22px}
+  .user-btn{background:#f8fafc;border:2px solid #e2e8f0;border-radius:12px;padding:18px 8px;text-align:center;transition:.2s}
+  .user-btn:hover{border-color:#10b981;transform:translateY(-2px)}
+  .user-btn.active{border-color:#10b981;background:#ecfdf5}
+  .user-av{width:48px;height:48px;border-radius:50%;margin:0 auto 8px;display:flex;align-items:center;justify-content:center;font-size:1.2rem;font-weight:700;color:#fff}
+  .user-nm{font-weight:600;font-size:.9rem}
+  .user-rl{font-size:.7rem;color:#6b7280;margin-top:2px}
+  #pinInput{width:100%;text-align:center;letter-spacing:12px;font-size:24px;padding:13px;border:1px solid #d1d5db;border-radius:10px;margin-bottom:12px}
+  .login-btn{width:100%;padding:13px;background:#10b981;color:#fff;border-radius:10px;font-size:1rem;font-weight:600}
+  .login-btn:hover{background:#059669}
+  #loginErr{color:#ef4444;font-size:.85rem;margin-top:10px;text-align:center;min-height:18px}
+
+  /* Profile / Admin */
+  .profile-banner{display:flex;align-items:center;gap:15px;padding:22px;background:linear-gradient(135deg,#10b981,#059669);border-radius:12px;color:#fff;margin-bottom:20px}
+  .profile-av{width:60px;height:60px;border-radius:50%;background:#fff;color:#10b981;display:flex;align-items:center;justify-content:center;font-size:1.5rem;font-weight:700}
+  .form-group{margin-bottom:15px}
+  .form-group label{display:block;margin-bottom:5px;font-size:.875rem;font-weight:500;color:#374151}
+  .form-group input,.form-group select,.form-group textarea{width:100%;padding:10px 12px;border:1px solid #d1d5db;border-radius:8px}
+  .form-group textarea{min-height:70px;resize:vertical}
+  .set-row{display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-bottom:1px solid #e5e7eb;gap:14px}
+  .set-row:last-of-type{border-bottom:none}
+  .set-row .desc{font-size:.78rem;color:#6b7280;margin-top:2px}
+  .toggle{position:relative;display:inline-block;width:46px;height:26px;flex-shrink:0}
+  .toggle input{opacity:0;width:0;height:0}
+  .slider{position:absolute;inset:0;background:#d1d5db;transition:.3s;border-radius:26px}
+  .slider:before{content:"";position:absolute;height:20px;width:20px;left:3px;bottom:3px;background:#fff;transition:.3s;border-radius:50%}
+  .toggle input:checked+.slider{background:#10b981}
+  .toggle input:checked+.slider:before{transform:translateX(20px)}
+  .admin-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:15px;margin-bottom:12px}
+  .admin-card.me{border-color:#10b981;border-width:2px}
+  .admin-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+  .admin-meta{display:flex;align-items:center;gap:10px}
+  .admin-av{width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700}
+  .admin-stats{display:flex;gap:14px;font-size:.78rem;color:#6b7280;margin-top:10px;flex-wrap:wrap}
+
+  /* Modal */
+  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px}
+  .modal{background:#fff;border-radius:16px;padding:24px;width:100%;max-width:500px;max-height:90vh;overflow:auto}
+  .modal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
+  .modal-head h3{font-size:1.2rem}
+  .modal-close{background:none;font-size:1.3rem;color:#6b7280}
+  .modal-btns{display:flex;gap:10px;justify-content:flex-end;margin-top:8px}
+
+  #syncBar{position:fixed;top:0;left:260px;right:0;text-align:center;font-size:12px;padding:5px;background:#1e293b;color:#fff;z-index:90}
+  .toast{position:fixed;bottom:20px;right:20px;background:#1e293b;color:#fff;padding:12px 20px;border-radius:10px;box-shadow:0 4px 12px rgba(0,0,0,.2);z-index:2000}
+  .mobile-toggle{display:none;position:fixed;top:14px;left:14px;z-index:101;background:#1e293b;color:#fff;padding:10px 12px;border-radius:8px}
+
+  @media(max-width:768px){
+    .sidebar{transform:translateX(-100%)}
+    .sidebar.open{transform:translateX(0)}
+    .main{margin-left:0;padding-top:60px}
+    .mobile-toggle{display:block}
+    #syncBar{left:0}
+    .stats{grid-template-columns:1fr 1fr}
+    .user-grid{grid-template-columns:1fr 1fr}
+  }
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="loginPage" class="login">
+  <div class="login-card">
+    <div class="login-logo"><h1><i class="fas fa-leaf"></i> MoneyMatrix</h1><p>Herbalife Business Tracker</p></div>
+    <p class="login-q">Who is using the app?</p>
+    <div class="user-grid" id="userGrid"></div>
+    <input id="pinInput" type="password" inputmode="numeric" maxlength="6" placeholder="••••" />
+    <button class="login-btn" id="loginBtn">Unlock</button>
+    <div id="loginErr"></div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="appShell" class="hidden">
+  <button class="mobile-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')"><i class="fas fa-bars"></i></button>
+  <div class="sidebar">
+    <div class="sidebar-brand"><h1><i class="fas fa-leaf"></i> MoneyMatrix</h1><p id="welcomeLine">Welcome, Admin</p></div>
+    <div id="navList"></div>
+  </div>
+
+  <div class="main">
+    <div id="syncBar">Connecting…</div>
+    <div class="topbar">
+      <h2 id="pageTitle">Dashboard</h2>
+      <div class="topbar-right">
+        <span class="pill pill-blue" id="modePill">Shared</span>
+        <span class="pill pill-purple" id="rolePill">Admin</span>
+        <span id="userName" style="font-weight:600">Admin</span>
+      </div>
+    </div>
+    <div id="pageBody"></div>
+  </div>
+</div>
+
+<div id="modalRoot"></div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+/* ===== Firebase ===== */
+const firebaseConfig = {
+  apiKey: "AIzaSyDNs_JNwPrB7vcw1OfMUS8kkOYxYaQ45YE",
+  authDomain: "money-metrix-9f1da.firebaseapp.com",
+  projectId: "money-metrix-9f1da",
+  storageBucket: "money-metrix-9f1da.firebasestorage.app",
+  messagingSenderId: "384847998438",
+  appId: "1:384847998438:web:2dca6550d379dc5f25fa27"
+};
+const fbApp = initializeApp(firebaseConfig);
+const db = getFirestore(fbApp);
+const DOC = doc(db, "moneymatrix", "appData");
+let writeTimer=null, applyingRemote=false;
+function cloudSave(){ if(applyingRemote) return; clearTimeout(writeTimer); writeTimer=setTimeout(()=>{ setDoc(DOC,{json:JSON.stringify(DB)}).catch(e=>setSync("Save error",true)); },400); }
+
+/* ===== Data model ===== */
+const STORE="mm_v2";
+let DB = {
+  users:[
+    {id:"admin",username:"admin",pin:"8888",role:"admin"},
+    {id:"dad",username:"dad",pin:"2619",role:"user"},
+    {id:"mom",username:"mom",pin:"2619",role:"user"}
+  ],
+  profiles:{
+    admin:{displayName:"Admin",phone:"",email:"",bio:"",theme:"light",dateFormat:"UK"},
+    dad:{displayName:"Dad",phone:"",email:"",bio:"",theme:"light",dateFormat:"UK"},
+    mom:{displayName:"Mom",phone:"",email:"",bio:"",theme:"light",dateFormat:"UK"}
+  },
+  settings:{appName:"MoneyMatrix",currency:"₹",dataSharing:true},
+  shared:{transactions:[],members:[],gifts:[]},
+  perUser:{}    // perUser[uid] = {transactions:[],members:[],gifts:[]}
+};
+
+let currentUser=null, viewingAs=null, activePage="dashboard";
+
+/* ===== Helpers ===== */
+const $=id=>document.getElementById(id);
+const cur=()=>DB.settings.currency||"₹";
+const money=n=>cur()+Number(n||0).toLocaleString("en-IN");
+const nid=()=>"id_"+Date.now()+"_"+Math.random().toString(36).slice(2,8);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const COLORS={admin:"#10b981",dad:"#3b82f6",mom:"#8b5cf6"};
+function fmtDate(d){ if(!d) return"-"; const x=new Date(d); const f=DB.profiles[currentUser?.id]?.dateFormat||"UK";
+  const dd=String(x.getDate()).padStart(2,"0"),mm=String(x.getMonth()+1).padStart(2,"0"),yy=x.getFullYear();
+  if(f==="US")return`${mm}/${dd}/${yy}`; if(f==="ISO")return`${yy}-${mm}-${dd}`; return`${dd}/${mm}/${yy}`; }
+function toast(m){ const t=document.createElement("div"); t.className="toast"; t.textContent=m; document.body.appendChild(t); setTimeout(()=>t.remove(),2200); }
+function setSync(txt,err){ const b=$("syncBar"); if(!b)return; b.textContent=txt; b.style.background=err?"#b91c1c":"#1e293b"; if(!err&&txt==="✓ Synced") setTimeout(()=>b.classList.add("hidden"),1500); else b.classList.remove("hidden"); }
+
+/* which dataset is in view */
+function data(){
+  if(DB.settings.dataSharing) return DB.shared;
+  const uid=viewingAs||currentUser?.id;
+  if(!DB.perUser[uid]) DB.perUser[uid]={transactions:[],members:[],gifts:[]};
+  return DB.perUser[uid];
+}
+function isAdmin(){ return currentUser?.role==="admin"; }
+function save(){ localStorage.setItem(STORE,JSON.stringify(DB)); cloudSave(); }
+
+/* ===== Boot ===== */
+function load(){ try{ const s=localStorage.getItem(STORE); if(s) DB={...DB,...JSON.parse(s)}; }catch(e){} ensure(); }
+function ensure(){
+  DB.users.forEach(u=>{ if(!DB.profiles[u.id]) DB.profiles[u.id]={displayName:u.username,phone:"",email:"",bio:"",theme:"light",dateFormat:"UK"}; if(!DB.perUser[u.id]) DB.perUser[u.id]={transactions:[],members:[],gifts:[]}; });
+  if(!DB.shared) DB.shared={transactions:[],members:[],gifts:[]};
+}
+function startCloud(){
+  onSnapshot(DOC, snap=>{
+    setSync("✓ Synced");
+    if(snap.exists()&&snap.data().json){ try{ applyingRemote=true; DB={...DB,...JSON.parse(snap.data().json)}; ensure(); localStorage.setItem(STORE,JSON.stringify(DB)); applyingRemote=false; if(currentUser) render(); }catch(e){} }
+    else { setSync("✓ Synced"); cloudSave(); }   // seed empty cloud
+  }, e=>setSync("Sync error — check Firestore rules",true));
+}
+
+/* ===== Login ===== */
+let selUser=null;
+function buildLogin(){
+  $("userGrid").innerHTML=DB.users.map(u=>`
+    <div class="user-btn" data-id="${u.id}" onclick="pickUser('${u.id}')">
+      <div class="user-av" style="background:${COLORS[u.id]||'#64748b'}">${(DB.profiles[u.id]?.displayName||u.username)[0].toUpperCase()}</div>
+      <div class="user-nm">${esc(DB.profiles[u.id]?.displayName||u.username)}</div>
+      <div class="user-rl">${u.role}</div>
+    </div>`).join("");
+}
+window.pickUser=id=>{ selUser=DB.users.find(u=>u.id===id); document.querySelectorAll(".user-btn").forEach(b=>b.classList.toggle("active",b.dataset.id===id)); $("pinInput").focus(); };
+function doLogin(){
+  const err=$("loginErr"), pin=$("pinInput").value.trim();
+  if(!selUser){ err.textContent="Pick a user first."; return; }
+  if(pin!==selUser.pin){ err.textContent="Wrong PIN."; $("pinInput").value=""; return; }
+  currentUser=selUser; viewingAs=currentUser.id;
+  sessionStorage.setItem("mm_session",currentUser.id);
+  $("loginPage").classList.add("hidden"); $("appShell").classList.remove("hidden");
+  buildNav(); render();
+}
+$("loginBtn").onclick=doLogin;
+$("pinInput").addEventListener("keydown",e=>{ if(e.key==="Enter") doLogin(); });
+
+/* ===== Navigation ===== */
+const NAV=[
+  {id:"dashboard",label:"Dashboard",icon:"fa-chart-line"},
+  {id:"business",label:"Business Account",icon:"fa-briefcase"},
+  {id:"club",label:"Club Membership",icon:"fa-users"},
+  {id:"gifts",label:"Gifts",icon:"fa-gift"},
+  {id:"backup",label:"Backup/Export",icon:"fa-database"},
+  {id:"admin",label:"Admin Panel",icon:"fa-cog",adminOnly:true},
+  {divider:true},
+  {id:"profile",label:"My Profile",icon:"fa-user-circle"},
+  {id:"settings",label:"Settings",icon:"fa-sliders-h"},
+  {id:"logout",label:"Logout",icon:"fa-sign-out-alt"}
+];
+function buildNav(){
+  $("navList").innerHTML=NAV.map(n=>{
+    if(n.divider) return `<div class="nav-divider"></div>`;
+    if(n.adminOnly&&!isAdmin()) return "";
+    return `<div class="nav-item${n.id===activePage?' active':''}" data-tab="${n.id}" onclick="go('${n.id}')"><i class="fas ${n.icon}"></i>${n.label}</div>`;
+  }).join("");
+}
+window.go=id=>{
+  if(id==="logout"){ sessionStorage.removeItem("mm_session"); location.reload(); return; }
+  activePage=id; buildNav();
+  if(window.innerWidth<=768) document.querySelector(".sidebar").classList.remove("open");
+  render();
+};
+
+/* viewing-as switcher (admin only, shared mode hides it) */
+function switcher(){
+  if(!isAdmin()||DB.settings.dataSharing) return "";
+  return `<div class="switcher"><span class="lbl">Viewing as:</span>`+
+    DB.users.map(u=>`<button class="chip${(viewingAs||currentUser.id)===u.id?' active':''}" onclick="setView('${u.id}')">${esc(DB.profiles[u.id]?.displayName||u.username)}</button>`).join("")+`</div>`;
+}
+window.setView=id=>{ viewingAs=id; render(); };
+
+/* ===== Top bar ===== */
+function topbar(title){
+  $("pageTitle").textContent=title;
+  $("welcomeLine").textContent="Welcome, "+(DB.profiles[currentUser.id]?.displayName||currentUser.username);
+  $("userName").textContent=DB.profiles[currentUser.id]?.displayName||currentUser.username;
+  $("rolePill").textContent=isAdmin()?"Admin":"User";
+  const mp=$("modePill"); mp.textContent=DB.settings.dataSharing?"Shared":"Isolated"; mp.className="pill "+(DB.settings.dataSharing?"pill-blue":"pill-purple");
+}
+
+/* ===== Router ===== */
+function render(){
+  const map={dashboard:renderDash,business:renderBusiness,club:renderClub,gifts:renderGifts,backup:renderBackup,admin:renderAdmin,profile:renderProfile,settings:renderSettings};
+  const titles={dashboard:"Dashboard",business:"Business Account",club:"Club Membership",gifts:"Gifts & Rewards",backup:"Backup & Export",admin:"Admin Panel",profile:"My Profile",settings:"Settings"};
+  if(activePage==="admin"&&!isAdmin()) activePage="dashboard";
+  topbar(titles[activePage]||"Dashboard");
+  (map[activePage]||renderDash)();
+}
+
+/* ===== Dashboard ===== */
+function renderDash(){
+  const d=data();
+  const rev=d.transactions.filter(t=>t.status==="completed").reduce((s,t)=>s+ +t.amount,0);
+  const orders=d.transactions.length;
+  $("pageBody").innerHTML=switcher()+`
+    <div class="stats">
+      <div class="stat"><div class="stat-ic ic-green"><i class="fas fa-dollar-sign"></i></div><div class="stat-val">${money(rev)}</div><div class="stat-lbl">Total Revenue</div></div>
+      <div class="stat"><div class="stat-ic ic-blue"><i class="fas fa-shopping-cart"></i></div><div class="stat-val">${orders}</div><div class="stat-lbl">Total Orders</div></div>
+      <div class="stat"><div class="stat-ic ic-purple"><i class="fas fa-users"></i></div><div class="stat-val">${d.members.length}</div><div class="stat-lbl">Club Members</div></div>
+      <div class="stat"><div class="stat-ic ic-red"><i class="fas fa-gift"></i></div><div class="stat-val">${d.gifts.length}</div><div class="stat-lbl">Gifts Given</div></div>
+    </div>
+    <div class="card"><div class="card-head"><span class="card-title">Recent Activity</span></div>
+      <div class="tbl-wrap">${
+        d.transactions.length? `<table><thead><tr><th>Date</th><th>Customer</th><th>Product</th><th>Amount</th><th>Status</th></tr></thead><tbody>`+
+        [...d.transactions].sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,6).map(t=>`<tr><td>${fmtDate(t.date)}</td><td>${esc(t.customer)}</td><td>${esc(t.product||"")}</td><td>${money(t.amount)}</td><td><span class="badge ${t.status==='completed'?'bg-green':'bg-amber'}">${t.status}</span></td></tr>`).join("")+`</tbody></table>`
+        : `<div class="empty"><i class="far fa-clock"></i>No recent activity</div>`}
+      </div>
+    </div>`;
+}
+
+/* ===== Business Account ===== */
+let bizSearch="",bizFilter="all";
+window.setBizSearch=v=>{ bizSearch=v.toLowerCase(); renderBusiness(); };
+window.setBizFilter=v=>{ bizFilter=v; renderBusiness(); };
+function renderBusiness(){
+  const d=data();
+  let rows=[...d.transactions].sort((a,b)=>new Date(b.date)-new Date(a.date));
+  if(bizFilter!=="all") rows=rows.filter(t=>t.status===bizFilter);
+  if(bizSearch) rows=rows.filter(t=>(t.customer||"").toLowerCase().includes(bizSearch)||(t.product||"").toLowerCase().includes(bizSearch));
+  $("pageBody").innerHTML=switcher()+`
+    <div class="card">
+      <div class="card-head"><span class="card-title">Business Transactions</span><button class="btn btn-primary" onclick="txModal()"><i class="fas fa-plus"></i> Add Transaction</button></div>
+      <div class="filter-row">
+        <input class="search" placeholder="Search transactions..." value="${esc(bizSearch)}" oninput="setBizSearch(this.value)">
+        <select onchange="setBizFilter(this.value)">
+          <option value="all"${bizFilter==='all'?' selected':''}>All Status</option>
+          <option value="completed"${bizFilter==='completed'?' selected':''}>Completed</option>
+          <option value="pending"${bizFilter==='pending'?' selected':''}>Pending</option>
+        </select>
+      </div>
+      <div class="tbl-wrap">${ rows.length?
+        `<table><thead><tr><th>Date</th><th>Customer</th><th>Product</th><th>Amount</th><th>Status</th><th>Actions</th></tr></thead><tbody>`+
+        rows.map(t=>`<tr><td>${fmtDate(t.date)}</td><td>${esc(t.customer)}</td><td>${esc(t.product||"")}${t.notes?`<div style="font-size:.75rem;color:#9ca3af">${esc(t.notes)}</div>`:""}</td><td>${money(t.amount)}</td><td><span class="badge ${t.status==='completed'?'bg-green':'bg-amber'}">${t.status}</span></td>
+        <td><button class="btn btn-sm btn-gray" onclick='txModal(${JSON.stringify(t)})'>Edit</button> <button class="btn btn-sm btn-red" onclick="delItem('transactions','${t.id}')">Delete</button></td></tr>`).join("")+`</tbody></table>`
+        : `<div class="empty"><i class="fas fa-receipt"></i>No transactions yet</div>`}</div>
+    </div>`;
+}
+window.txModal=(t={})=>showModal(`
+  <div class="modal-head"><h3>${t.id?"Edit":"Add"} Transaction</h3><button class="modal-close" onclick="closeModal()">×</button></div>
+  <div class="form-group"><label>Customer Name</label><input id="f_cust" value="${esc(t.customer||"")}"></div>
+  <div class="form-group"><label>Product</label><input id="f_prod" value="${esc(t.product||"")}"></div>
+  <div class="form-group"><label>Amount</label><input id="f_amt" type="number" inputmode="numeric" value="${t.amount||""}"></div>
+  <div class="form-group"><label>Status</label><select id="f_stat"><option value="completed"${t.status==='completed'?' selected':''}>Completed</option><option value="pending"${t.status==='pending'?' selected':''}>Pending</option></select></div>
+  <div class="form-group"><label>Notes</label><textarea id="f_notes">${esc(t.notes||"")}</textarea></div>
+  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveTx("${t.id||""}","${t.date||""}")'>Save</button></div>`);
+window.saveTx=(id,date)=>{
+  const o={id:id||nid(),customer:$("f_cust").value.trim(),product:$("f_prod").value.trim(),amount:+$("f_amt").value||0,status:$("f_stat").value,notes:$("f_notes").value.trim(),date:date||new Date().toISOString(),ownerId:viewingAs||currentUser.id};
+  if(!o.customer){ toast("Customer name required"); return; }
+  if(o.status==="completed") o.completedDate=new Date().toISOString();
+  const d=data(); const i=d.transactions.findIndex(x=>x.id===id); if(i>=0)d.transactions[i]=o; else d.transactions.push(o);
+  save(); closeModal(); render(); toast(id?"Transaction updated":"Transaction added");
+};
+
+/* ===== Club Membership ===== */
+let clubSearch="";
+function renderClub(){
+  const d=data();
+  let rows=d.members; if(clubSearch) rows=rows.filter(m=>(m.name||"").toLowerCase().includes(clubSearch));
+  const k1=d.members.filter(m=>m.firstKit==="completed").length, k2=d.members.filter(m=>m.secondKit==="completed").length;
+  $("pageBody").innerHTML=switcher()+`
+    <div class="card">
+      <div class="card-head"><span class="card-title">Club Membership</span><button class="btn btn-primary" onclick="memberModal()"><i class="fas fa-plus"></i> Add Member</button></div>
+      <input class="search" placeholder="Search members..." value="${esc(clubSearch)}" oninput="clubSearch=this.value.toLowerCase();renderClub()">
+      <div class="tbl-wrap">${ rows.length?
+        `<table><thead><tr><th>Name</th><th>Phone</th><th>Join Date</th><th>First Kit</th><th>Second Kit</th><th>Actions</th></tr></thead><tbody>`+
+        rows.map(m=>`<tr><td>${esc(m.name)}</td><td>${esc(m.phone||"-")}</td><td>${fmtDate(m.joinDate)}</td><td><span class="badge ${m.firstKit==='completed'?'bg-green':'bg-amber'}">${m.firstKit||'pending'}</span></td><td><span class="badge ${m.secondKit==='completed'?'bg-green':'bg-amber'}">${m.secondKit||'pending'}</span></td>
+        <td><button class="btn btn-sm btn-gray" onclick='memberModal(${JSON.stringify(m)})'>Edit</button> <button class="btn btn-sm btn-red" onclick="delItem('members','${m.id}')">Delete</button></td></tr>`).join("")+`</tbody></table>`
+        : `<div class="empty"><i class="fas fa-users"></i>No members found</div>`}</div>
+    </div>
+    <div class="card"><div class="card-head"><span class="card-title">Kit Tracking</span></div>${
+      d.members.length? `<div class="stats" style="margin-bottom:0">
+        <div class="stat"><div class="stat-ic ic-teal"><i class="fas fa-box"></i></div><div class="stat-val">${k1}/${d.members.length}</div><div class="stat-lbl">First Kit Completed</div></div>
+        <div class="stat"><div class="stat-ic ic-purple"><i class="fas fa-boxes-stacked"></i></div><div class="stat-val">${k2}/${d.members.length}</div><div class="stat-lbl">Second Kit Completed</div></div></div>`
+      : `<div class="empty"><i class="fas fa-box"></i>No kit data available</div>`}</div>`;
+}
+window.memberModal=(m={})=>showModal(`
+  <div class="modal-head"><h3>${m.id?"Edit":"Add"} Club Member</h3><button class="modal-close" onclick="closeModal()">×</button></div>
+  <div class="form-group"><label>Name</label><input id="m_name" value="${esc(m.name||"")}"></div>
+  <div class="form-group"><label>Phone</label><input id="m_phone" value="${esc(m.phone||"")}"></div>
+  <div class="form-group"><label>Email</label><input id="m_email" value="${esc(m.email||"")}"></div>
+  <div class="form-group"><label>First Kit Status</label><select id="m_k1"><option value="pending"${m.firstKit==='pending'?' selected':''}>Pending</option><option value="completed"${m.firstKit==='completed'?' selected':''}>Completed</option></select></div>
+  <div class="form-group"><label>Second Kit Status</label><select id="m_k2"><option value="pending"${m.secondKit==='pending'?' selected':''}>Pending</option><option value="completed"${m.secondKit==='completed'?' selected':''}>Completed</option></select></div>
+  <div class="form-group"><label>Notes</label><textarea id="m_notes">${esc(m.notes||"")}</textarea></div>
+  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveMember("${m.id||""}","${m.joinDate||""}")'>Save</button></div>`);
+window.saveMember=(id,joinDate)=>{
+  const name=$("m_name").value.trim();
+  if(!name){ toast("Name required"); return; }
+  const d=data();
+  // duplicate-name confirmation (skip when editing the same record)
+  const dup=d.members.some(m=>m.id!==id && (m.name||"").trim().toLowerCase()===name.toLowerCase());
+  if(dup && !confirm(`A member named "${name}" already exists. Add anyway?`)) return;
+  const o={id:id||nid(),name,phone:$("m_phone").value.trim(),email:$("m_email").value.trim(),firstKit:$("m_k1").value,secondKit:$("m_k2").value,notes:$("m_notes").value.trim(),joinDate:joinDate||new Date().toISOString(),ownerId:viewingAs||currentUser.id};
+  const i=d.members.findIndex(x=>x.id===id); if(i>=0)d.members[i]=o; else d.members.push(o);
+  save(); closeModal(); render(); toast(id?"Member updated":"Member added");
+};
+
+/* ===== Gifts ===== */
+let giftSearch="";
+function renderGifts(){
+  const d=data();
+  let rows=d.gifts; if(giftSearch) rows=rows.filter(g=>(g.recipient||"").toLowerCase().includes(giftSearch)||(g.description||"").toLowerCase().includes(giftSearch));
+  $("pageBody").innerHTML=switcher()+`
+    <div class="card">
+      <div class="card-head"><span class="card-title">Gifts & Rewards</span><button class="btn btn-primary" onclick="giftModal()"><i class="fas fa-plus"></i> Add Gift</button></div>
+      <input class="search" placeholder="Search gifts..." value="${esc(giftSearch)}" oninput="giftSearch=this.value.toLowerCase();renderGifts()">
+      <div class="tbl-wrap">${ rows.length?
+        `<table><thead><tr><th>Date</th><th>Recipient</th><th>Gift</th><th>Occasion</th><th>Value</th><th>Actions</th></tr></thead><tbody>`+
+        rows.map(g=>`<tr><td>${fmtDate(g.date)}</td><td>${esc(g.recipient)}</td><td>${esc(g.description||"")}</td><td>${esc(g.occasion||"-")}</td><td>${money(g.value)}</td>
+        <td><button class="btn btn-sm btn-gray" onclick='giftModal(${JSON.stringify(g)})'>Edit</button> <button class="btn btn-sm btn-red" onclick="delItem('gifts','${g.id}')">Delete</button></td></tr>`).join("")+`</tbody></table>`
+        : `<div class="empty"><i class="fas fa-gift"></i>No gifts logged</div>`}</div>
+    </div>`;
+}
+window.giftModal=(g={})=>showModal(`
+  <div class="modal-head"><h3>${g.id?"Edit":"Add"} Gift</h3><button class="modal-close" onclick="closeModal()">×</button></div>
+  <div class="form-group"><label>Recipient</label><input id="g_rec" value="${esc(g.recipient||"")}"></div>
+  <div class="form-group"><label>Gift Description</label><input id="g_desc" value="${esc(g.description||"")}"></div>
+  <div class="form-group"><label>Occasion</label><input id="g_occ" value="${esc(g.occasion||"")}" placeholder="Birthday, Anniversary, etc."></div>
+  <div class="form-group"><label>Value</label><input id="g_val" type="number" value="${g.value||""}"></div>
+  <div class="form-group"><label>Date</label><input id="g_date" type="date" value="${g.date?new Date(g.date).toISOString().slice(0,10):""}"></div>
+  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveGift("${g.id||""}")'>Save</button></div>`);
+window.saveGift=id=>{
+  const rec=$("g_rec").value.trim(); if(!rec){ toast("Recipient required"); return; }
+  const dv=$("g_date").value;
+  const o={id:id||nid(),recipient:rec,description:$("g_desc").value.trim(),occasion:$("g_occ").value.trim(),value:+$("g_val").value||0,date:dv?new Date(dv).toISOString():new Date().toISOString(),ownerId:viewingAs||currentUser.id};
+  const d=data(); const i=d.gifts.findIndex(x=>x.id===id); if(i>=0)d.gifts[i]=o; else d.gifts.push(o);
+  save(); closeModal(); render(); toast(id?"Gift updated":"Gift added");
+};
+
+/* shared delete */
+window.delItem=(coll,id)=>{ if(!confirm("Delete this item?"))return; const d=data(); d[coll]=d[coll].filter(x=>x.id!==id); save(); render(); toast("Deleted"); };
+
+/* ===== Backup / Export ===== */
+function renderBackup(){
+  $("pageBody").innerHTML=`
+    <div class="card"><div class="card-head"><span class="card-title">Backup & Export</span></div>
+      <div class="stats" style="margin-bottom:0">
+        <div class="stat" style="text-align:center"><div class="stat-ic ic-green" style="margin:0 auto 12px"><i class="fas fa-download"></i></div><div style="font-weight:600;margin-bottom:6px">Export Data</div><p style="font-size:.8rem;color:#6b7280;margin-bottom:12px">Download everything as JSON</p><button class="btn btn-primary" onclick="exportJSON()">Export JSON</button></div>
+        <div class="stat" style="text-align:center"><div class="stat-ic ic-blue" style="margin:0 auto 12px"><i class="fas fa-upload"></i></div><div style="font-weight:600;margin-bottom:6px">Import Data</div><p style="font-size:.8rem;color:#6b7280;margin-bottom:12px">Restore from a backup file</p><input type="file" id="impFile" accept=".json" class="hidden" onchange="importJSON(event)"><button class="btn btn-blue" onclick="document.getElementById('impFile').click()">Import JSON</button></div>
+        <div class="stat" style="text-align:center"><div class="stat-ic ic-amber" style="margin:0 auto 12px"><i class="fas fa-file-csv"></i></div><div style="font-weight:600;margin-bottom:6px">Export CSV</div><p style="font-size:.8rem;color:#6b7280;margin-bottom:12px">Transactions as a spreadsheet</p><button class="btn btn-amber" onclick="exportCSV()">Export CSV</button></div>
+      </div>
+    </div>
+    <div class="card"><p style="font-size:.82rem;color:#6b7280">Data syncs live across every logged-in device. Import is mainly for a one-time migration of your old backup — it merges into the currently viewed dataset.</p></div>`;
+}
+window.exportJSON=()=>{ dl(JSON.stringify({exportedAt:new Date().toISOString(),...DB},null,2),"moneymatrix_backup_"+new Date().toISOString().slice(0,10)+".json","application/json"); };
+window.exportCSV=()=>{ const d=data(); const rows=[["Date","Customer","Product","Amount","Status","Notes"],...d.transactions.map(t=>[fmtDate(t.date),t.customer,t.product||"",t.amount,t.status,(t.notes||"").replace(/[\n,]/g," ")])]; dl(rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n"),"transactions.csv","text/csv"); };
+function dl(content,name,type){ const b=new Blob([content],{type}); const a=document.createElement("a"); a.href=URL.createObjectURL(b); a.download=name; a.click(); }
+window.importJSON=e=>{
+  const f=e.target.files[0]; if(!f)return; const r=new FileReader();
+  r.onload=()=>{ try{
+    const j=JSON.parse(r.result);
+    const sd=j.sharedData||j.shared||j;   // accept old & new backup shapes
+    if(!confirm("Import will merge this backup into the data you're currently viewing. Continue?")) return;
+    const d=data();
+    ["transactions","members","gifts"].forEach(c=>{ (sd[c]||[]).forEach(item=>{ const id=item.id||nid(); if(!d[c].some(x=>x.id===id)) d[c].push({...item,id}); }); });
+    save(); render(); toast("Import complete");
+  }catch(err){ toast("Import failed: "+err.message); } };
+  r.readAsText(f);
+};
+
+/* ===== Admin Panel ===== */
+function renderAdmin(){
+  const totalRev=Object.values(DB.settings.dataSharing?{s:DB.shared}:DB.perUser).reduce((s,u)=>s+u.transactions.filter(t=>t.status==="completed").reduce((a,t)=>a+ +t.amount,0),0);
+  const totalTx=DB.settings.dataSharing?DB.shared.transactions.length:Object.values(DB.perUser).reduce((s,u)=>s+u.transactions.length,0);
+  const sizeKB=Math.max(1,Math.round(JSON.stringify(DB).length/1024));
+  $("pageBody").innerHTML=`
+    <div class="stats">
+      <div class="stat"><div class="stat-ic ic-purple"><i class="fas fa-users"></i></div><div class="stat-val">${DB.users.length}</div><div class="stat-lbl">Total Users</div></div>
+      <div class="stat"><div class="stat-ic ic-green"><i class="fas fa-dollar-sign"></i></div><div class="stat-val">${money(totalRev)}</div><div class="stat-lbl">Total Family Revenue</div></div>
+      <div class="stat"><div class="stat-ic ic-blue"><i class="fas fa-shopping-cart"></i></div><div class="stat-val">${totalTx}</div><div class="stat-lbl">Total Transactions</div></div>
+      <div class="stat"><div class="stat-ic ic-amber"><i class="fas fa-database"></i></div><div class="stat-val">${sizeKB} KB</div><div class="stat-lbl">Storage Used</div></div>
+    </div>
+    <div class="card"><div class="card-head"><span class="card-title">Family Members Overview</span><button class="btn btn-primary" onclick="userModal()"><i class="fas fa-user-plus"></i> Add User</button></div>
+      ${DB.users.map(u=>{ const ud=DB.settings.dataSharing?DB.shared:(DB.perUser[u.id]||{transactions:[],members:[],gifts:[]});
+        const rev=ud.transactions.filter(t=>t.status==="completed").reduce((a,t)=>a+ +t.amount,0);
+        return `<div class="admin-card${u.id===currentUser.id?' me':''}">
+          <div class="admin-head"><div class="admin-meta"><div class="admin-av" style="background:${COLORS[u.id]||'#64748b'}">${(DB.profiles[u.id]?.displayName||u.username)[0].toUpperCase()}</div>
+            <div><div style="font-weight:600">${esc(DB.profiles[u.id]?.displayName||u.username)} <span class="badge ${u.role==='admin'?'bg-green':'bg-gray'}">${u.role}</span></div>
+            <div style="font-size:.76rem;color:#6b7280">@${esc(u.username)} · PIN ${esc(u.pin)}</div></div></div>
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-sm btn-gray" onclick="userModal('${u.id}')">Edit</button>
+              ${u.role==='admin'?'':`<button class="btn btn-sm btn-blue" onclick="makeAdmin('${u.id}')">Make Admin</button><button class="btn btn-sm btn-red" onclick="delUser('${u.id}')">Delete</button>`}
+            </div></div>
+          <div class="admin-stats"><span><i class="fas fa-shopping-cart"></i> ${ud.transactions.length} orders</span><span><i class="fas fa-dollar-sign"></i> ${money(rev)}</span><span><i class="fas fa-users"></i> ${ud.members.length} members</span><span><i class="fas fa-gift"></i> ${ud.gifts.length} gifts</span></div>
+        </div>`; }).join("")}
+    </div>
+    <div class="card"><div class="card-head"><span class="card-title">Data & Privacy Settings</span></div>
+      <div class="set-row"><div><div style="font-weight:500">Data Sharing Mode</div><div class="desc">When ON, all users share the same data. When OFF, each user has isolated data.</div></div>
+        <label class="toggle"><input type="checkbox" id="shareToggle" ${DB.settings.dataSharing?"checked":""} onchange="toggleShare()"><span class="slider"></span></label></div>
+      <div class="set-row"><div><div style="font-weight:500">App Name</div><div class="desc">Shown in the header and login</div></div><input id="setName" style="width:200px" value="${esc(DB.settings.appName)}"></div>
+      <div class="set-row"><div><div style="font-weight:500">Currency Symbol</div><div class="desc">Used throughout the app</div></div>
+        <select id="setCur" style="width:120px"><option value="₹"${cur()==='₹'?' selected':''}>₹ INR</option><option value="$"${cur()==='$'?' selected':''}>$ USD</option><option value="€"${cur()==='€'?' selected':''}>€ EUR</option><option value="£"${cur()==='£'?' selected':''}>£ GBP</option></select></div>
+      <button class="btn btn-primary" style="margin-top:14px" onclick="saveAdminSettings()"><i class="fas fa-save"></i> Save Settings</button>
+    </div>`;
+}
+window.toggleShare=()=>{ DB.settings.dataSharing=$("shareToggle").checked; save(); render(); };
+window.saveAdminSettings=()=>{ DB.settings.appName=$("setName").value.trim()||"MoneyMatrix"; DB.settings.currency=$("setCur").value; save(); render(); toast("Settings saved"); };
+window.makeAdmin=id=>{ if(!confirm("Give this user admin access?"))return; const u=DB.users.find(x=>x.id===id); if(u)u.role="admin"; save(); render(); toast("Now an admin"); };
+window.delUser=id=>{ if(id===currentUser.id){toast("You can't delete yourself");return;} if(!confirm("Delete this user and their data?"))return; DB.users=DB.users.filter(u=>u.id!==id); delete DB.profiles[id]; delete DB.perUser[id]; save(); render(); toast("User deleted"); };
+window.userModal=(id)=>{ const u=id?DB.users.find(x=>x.id===id):null; const p=id?DB.profiles[id]:{};
+  showModal(`<div class="modal-head"><h3>${u?"Edit":"Add"} User</h3><button class="modal-close" onclick="closeModal()">×</button></div>
+    <div class="form-group"><label>Display Name</label><input id="u_name" value="${esc(p.displayName||"")}"></div>
+    <div class="form-group"><label>Username</label><input id="u_user" value="${esc(u?u.username:"")}" ${u?"disabled":""}></div>
+    <div class="form-group"><label>PIN (4–6 digits)</label><input id="u_pin" inputmode="numeric" value="${esc(u?u.pin:"")}"></div>
+    <div class="form-group"><label>Role</label><select id="u_role"><option value="user"${u&&u.role==='user'?' selected':''}>User</option><option value="admin"${u&&u.role==='admin'?' selected':''}>Admin</option></select></div>
+    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveUser("${id||""}")'>Save</button></div>`);
+};
+window.saveUser=id=>{
+  const name=$("u_name").value.trim(), pin=$("u_pin").value.trim(), role=$("u_role").value;
+  if(pin.length<4){ toast("PIN must be at least 4 digits"); return; }
+  if(id){ const u=DB.users.find(x=>x.id===id); u.pin=pin; u.role=role; DB.profiles[id].displayName=name||u.username; }
+  else { const username=$("u_user").value.trim().toLowerCase(); if(!username){toast("Username required");return;} if(DB.users.some(u=>u.username===username)){toast("Username already exists");return;}
+    const newU={id:username,username,pin,role}; DB.users.push(newU); DB.profiles[username]={displayName:name||username,phone:"",email:"",bio:"",theme:"light",dateFormat:"UK"}; DB.perUser[username]={transactions:[],members:[],gifts:[]}; }
+  save(); closeModal(); render(); toast("User saved");
+};
+
+/* ===== Profile ===== */
+function renderProfile(){
+  const p=DB.profiles[currentUser.id]||{};
+  $("pageBody").innerHTML=`
+    <div class="profile-banner"><div class="profile-av">${(p.displayName||currentUser.username)[0].toUpperCase()}</div><div><h3 style="font-size:1.2rem">${esc(p.displayName||currentUser.username)}</h3><p style="opacity:.9;font-size:.85rem">${isAdmin()?"Administrator":"User"}</p></div></div>
+    <div class="card"><div class="card-head"><span class="card-title">Edit Profile</span></div>
+      <div class="form-group"><label>Display Name</label><input id="p_name" value="${esc(p.displayName||"")}"></div>
+      <div class="form-group"><label>Phone Number</label><input id="p_phone" value="${esc(p.phone||"")}"></div>
+      <div class="form-group"><label>Email</label><input id="p_email" value="${esc(p.email||"")}"></div>
+      <div class="form-group"><label>Bio / Notes</label><textarea id="p_bio">${esc(p.bio||"")}</textarea></div>
+      <button class="btn btn-primary" onclick="saveProfile()"><i class="fas fa-save"></i> Save Profile</button>
+    </div>
+    <div class="card"><div class="card-head"><span class="card-title">My Preferences</span></div>
+      <div class="form-group"><label>Date Format</label><select id="p_date"><option value="UK"${p.dateFormat==='UK'?' selected':''}>UK (DD/MM/YYYY)</option><option value="US"${p.dateFormat==='US'?' selected':''}>US (MM/DD/YYYY)</option><option value="ISO"${p.dateFormat==='ISO'?' selected':''}>ISO (YYYY-MM-DD)</option></select></div>
+      <button class="btn btn-primary" onclick="savePrefs()"><i class="fas fa-save"></i> Save Preferences</button>
+    </div>`;
+}
+window.saveProfile=()=>{ const p=DB.profiles[currentUser.id]; p.displayName=$("p_name").value.trim()||currentUser.username; p.phone=$("p_phone").value.trim(); p.email=$("p_email").value.trim(); p.bio=$("p_bio").value.trim(); save(); render(); toast("Profile saved"); };
+window.savePrefs=()=>{ DB.profiles[currentUser.id].dateFormat=$("p_date").value; save(); render(); toast("Preferences saved"); };
+
+/* ===== Settings ===== */
+function renderSettings(){
+  $("pageBody").innerHTML=`
+    <div class="card"><div class="card-head"><span class="card-title">Change My PIN</span></div>
+      <div class="form-group"><label>Current PIN</label><input id="s_cur" inputmode="numeric" type="password"></div>
+      <div class="form-group"><label>New PIN (4–6 digits)</label><input id="s_new" inputmode="numeric" type="password"></div>
+      <div class="form-group"><label>Confirm New PIN</label><input id="s_conf" inputmode="numeric" type="password"></div>
+      <button class="btn btn-primary" onclick="changePin()"><i class="fas fa-key"></i> Change PIN</button>
+    </div>
+    <div class="card"><div class="card-head"><span class="card-title">About</span></div>
+      <p style="font-size:.85rem;color:#6b7280">MoneyMatrix · Herbalife Business Tracker. Data syncs in real time across all devices signed in with the same family account.</p>
+    </div>`;
+}
+window.changePin=()=>{
+  const c=$("s_cur").value.trim(),n=$("s_new").value.trim(),cf=$("s_conf").value.trim();
+  if(c!==currentUser.pin){ toast("Current PIN is wrong"); return; }
+  if(n.length<4){ toast("New PIN must be at least 4 digits"); return; }
+  if(n!==cf){ toast("PINs don't match"); return; }
+  DB.users.find(u=>u.id===currentUser.id).pin=n; currentUser.pin=n; save(); render(); toast("PIN changed");
+};
+
+/* ===== Modal plumbing ===== */
+function showModal(html){ $("modalRoot").innerHTML=`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal">${html}</div></div>`; }
+window.closeModal=()=>{ $("modalRoot").innerHTML=""; };
+
+/* ===== Start ===== */
+load(); buildLogin(); startCloud();
+const sess=sessionStorage.getItem("mm_session");
+if(sess){ const u=DB.users.find(x=>x.id===sess); if(u){ currentUser=u; viewingAs=u.id; $("loginPage").classList.add("hidden"); $("appShell").classList.remove("hidden"); buildNav(); render(); } }
+</script>
+</body>
+</html>
