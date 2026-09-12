@@ -681,7 +681,7 @@ const firebaseConfig = {
 // all on the Spark/free plan) to a Cloudflare Worker with the same request/response contract.
 // setUserPin / saveAppData / getAppData are UNCHANGED and still go through Firebase Functions
 // below. See cloudflare-worker/README.md for deployment steps and for why this exists.
-const LOGIN_ENDPOINT = "https://moneymatrix-login.YOUR-SUBDOMAIN.workers.dev";
+const LOGIN_ENDPOINT = "https://moneymatrix-login.moneymatrix-login.workers.dev";
 let fbApp=null, db=null, DOC=null, META=null, auth=null, fbFunctions=null, setUserPinFn=null, saveAppDataFn=null, getAppDataFn=null;
 if (firebaseAvailable) {
   try {

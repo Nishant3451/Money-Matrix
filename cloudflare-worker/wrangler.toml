@@ -1,0 +1,11 @@
+name = "moneymatrix-login"
+main = "login-worker.js"
+compatibility_date = "2024-11-01"
+
+[vars]
+FIREBASE_PROJECT_ID = "money-metrix-9f1da"
+# Comma-separated list if you ever need more than one allowed origin (e.g. a local dev server).
+ALLOWED_ORIGIN = "https://nishant3451.github.io"
+
+# Create with: wrangler kv namespace create RATE_LIMIT_KV
+# Then paste the returned id below.

@@ -1,0 +1,5 @@
+node_modules/
+*.zip
+*.json
+!package.json
+!cloudflare-worker/package.json
