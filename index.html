@@ -627,7 +627,6 @@
 // localStorage) instead of failing to load at all.
 let initializeApp=null, getFirestore=null, fsDoc=null, setDoc=null, onSnapshot=null, firebaseAvailable=false;
 let getAuth=null, signInWithCustomToken=null, onAuthStateChanged=null, signOut=null, browserSessionPersistence=null, setPersistence=null;
-let getFunctions=null, httpsCallable=null;
 // Guardrail: a raw HTML file opened straight from disk (file://) is almost always someone
 // testing locally before deploying — NOT the deployed production copy. Without this check
 // that local test copy still connects to the exact same live Firestore document as
@@ -644,13 +643,16 @@ if (isLocalFileTest) {
     const appMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js");
     const fsMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js");
     const authMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js");
-    const fnMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js");
+    // firebase-functions is no longer imported: getAppData/saveAppData/setUserPin were Cloud
+    // Functions callables, which — same as the original `login` — can never actually deploy on
+    // the Spark plan. They're now served by the same Cloudflare Worker `login` already uses
+    // (see callWorkerApi() below), authenticated with the caller's Firebase ID token instead of
+    // Cloud Functions' built-in callable auth context.
     initializeApp = appMod.initializeApp;
     getFirestore = fsMod.getFirestore; fsDoc = fsMod.doc; setDoc = fsMod.setDoc; onSnapshot = fsMod.onSnapshot;
     getAuth = authMod.getAuth; signInWithCustomToken = authMod.signInWithCustomToken;
     onAuthStateChanged = authMod.onAuthStateChanged; signOut = authMod.signOut;
     browserSessionPersistence = authMod.browserSessionPersistence; setPersistence = authMod.setPersistence;
-    getFunctions = fnMod.getFunctions; httpsCallable = fnMod.httpsCallable;
     // App Check is NOT initialized here yet. It's a bot/abuse mitigation (proves "this is a
     // genuine instance of this app", not "this is a genuine user" — authentication above still
     // does that job) and doesn't replace anything else in this file. Turning it on requires:
@@ -659,10 +661,12 @@ if (isLocalFileTest) {
     //   2. import { initializeAppCheck, ReCaptchaV3Provider } from
     //      "https://www.gstatic.com/firebasejs/10.12.2/firebase-app-check.js", then
     //      initializeAppCheck(fbApp, { provider: new ReCaptchaV3Provider("<your site key>"),
-    //      isTokenAutoRefreshEnabled: true }) — right here, before any callable is used.
-    //   3. Only THEN flip ENFORCE_APP_CHECK to true in functions/index.js — turning that on
-    //      before this client-side piece exists would lock out all real traffic too, since
-    //      there'd be no App Check token for the server to find on any request, genuine or not.
+    //      isTokenAutoRefreshEnabled: true }) — right here, before any request is made.
+    //   3. Only THEN add App Check token verification to the Worker (cloudflare-worker/) —
+    //      turning that on before this client-side piece exists would lock out all real traffic
+    //      too, since there'd be no App Check token for the server to find on any request,
+    //      genuine or not. Not implemented today — this is a future hardening step, not a
+    //      regression from this fix.
     firebaseAvailable = true;
   } catch(e) {
     console.warn("Cloud sync unavailable (Firebase failed to load) — running in local-only mode.", e);
@@ -677,19 +681,53 @@ const firebaseConfig = {
   messagingSenderId: "384847998438",
   appId: "1:384847998438:web:2dca6550d379dc5f25fa27"
 };
-// LOGIN-ONLY FIX: `login` moved off Firebase Cloud Functions (Cloud Functions cannot deploy at
-// all on the Spark/free plan) to a Cloudflare Worker with the same request/response contract.
-// setUserPin / saveAppData / getAppData are UNCHANGED and still go through Firebase Functions
-// below. See cloudflare-worker/README.md for deployment steps and for why this exists.
+// `login`, `getAppData`, `saveAppData`, and `setUserPin` ALL moved off Firebase Cloud Functions
+// (Cloud Functions cannot deploy at all on the Spark/free plan — that's what silently broke
+// sync even after the login-only fix) onto the same Cloudflare Worker, at /login, /data/get,
+// /data/save, and /user/setPin respectively. See cloudflare-worker/README.md.
 const LOGIN_ENDPOINT = "https://moneymatrix-login.moneymatrix-login.workers.dev";
-let fbApp=null, db=null, DOC=null, META=null, auth=null, fbFunctions=null, setUserPinFn=null, saveAppDataFn=null, getAppDataFn=null;
+
+// Thin replacement for Firebase's httpsCallable(): same {data: ...} response shape and same
+// thrown-error-with-.code convention (existing catch blocks check e.code ===
+// "functions/permission-denied", so that convention is preserved rather than changed)  — but
+// authenticated with a Firebase ID token in an Authorization header instead of Cloud
+// Functions' built-in callable auth context, since a Cloudflare Worker has no such thing.
+async function callWorkerApi(path, body) {
+  if (!auth || !auth.currentUser) {
+    throw Object.assign(new Error("Not signed in"), { code: "functions/unauthenticated" });
+  }
+  const doFetch = async (idToken) => fetch(`${LOGIN_ENDPOINT}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${idToken}` },
+    body: JSON.stringify(body || {})
+  });
+  let resp = await doFetch(await auth.currentUser.getIdToken());
+  if (resp.status === 401) {
+    // The token may simply be stale (e.g. claims changed since it was minted) — force a real
+    // refresh once before treating this as a genuine session failure.
+    resp = await doFetch(await auth.currentUser.getIdToken(true));
+  }
+  if (resp.status === 401) {
+    if (typeof forceLogout === "function") forceLogout("Your session expired — please log in again.");
+    throw Object.assign(new Error("Session expired"), { code: "functions/unauthenticated" });
+  }
+  if (resp.status === 403) {
+    throw Object.assign(new Error("Not authorized"), { code: "functions/permission-denied" });
+  }
+  if (!resp.ok) {
+    throw Object.assign(new Error("Request failed"), { code: "functions/internal" });
+  }
+  return resp.json();
+}
+
+let fbApp=null, db=null, DOC=null, META=null, auth=null, setUserPinFn=null, saveAppDataFn=null, getAppDataFn=null;
 if (firebaseAvailable) {
   try {
     fbApp = initializeApp(firebaseConfig);
     db = getFirestore(fbApp);
     DOC = fsDoc(db, "moneymatrix", "appData");
     // The one thing clients still read directly via Firestore — just a bump timestamp, never
-    // the actual data (see firestore.rules and getAppData() in functions/index.js). Listening
+    // the actual data (see firestore.rules and the /data/get handler in cloudflare-worker/login-worker.js). Listening
     // to this is what keeps sync feeling near-real-time without ever reading the real
     // document directly.
     META = fsDoc(db, "moneymatrix", "meta");
@@ -700,10 +738,9 @@ if (firebaseAvailable) {
     // actually depends on this session being alive (see startCloud()), so it needs to
     // expire on the same terms the rest of the app already promises the user.
     await setPersistence(auth, browserSessionPersistence);
-    fbFunctions = getFunctions(fbApp);
-    setUserPinFn = httpsCallable(fbFunctions, "setUserPin");
-    saveAppDataFn = httpsCallable(fbFunctions, "saveAppData");
-    getAppDataFn = httpsCallable(fbFunctions, "getAppData");
+    setUserPinFn = (payload) => callWorkerApi("/user/setPin", payload);
+    saveAppDataFn = (payload) => callWorkerApi("/data/save", payload);
+    getAppDataFn = () => callWorkerApi("/data/get", {});
     // Cloud sync only ever begins once Firebase has actually confirmed a signed-in user —
     // see startCloud(), which now checks auth.currentUser before subscribing. This listener
     // is what (re)starts sync both right after a fresh login and after a same-tab reload
@@ -725,8 +762,8 @@ const STORE="mm_v2";
 // emails, transactions, club members, gifts, coaches, supervisors) directly in the shipped
 // frontend, which meant anyone who simply downloaded this file — no login required — could
 // read real business/member data in plaintext. That data never needed to live here: online,
-// the actual application state always comes from the authenticated getAppData() Cloud
-// Function (see functions/index.js + firestore.rules), which overwrites this on first sync
+// the actual application state always comes from the authenticated /data/get Worker endpoint
+// (see cloudflare-worker/lib/authorization.js + firestore.rules), which overwrites this on first sync
 // (see applyRemoteJson()). This is just the pre-login/offline/first-run default shape — safe,
 // empty state only. ensure() (below) fills in any missing defaults (permissions matrix,
 // per-user buckets, an offline-only recovery superadmin, etc.) the moment the app loads, so
@@ -763,7 +800,7 @@ function persistLocal(){
 // `save`/`cloudSave` now return a Promise<{ok, offline?, deferred?, error?}> so real Save-button
 // UI (Priority 2) can await genuine success/failure instead of guessing. This is purely a client
 // orchestration change — nothing about WHEN pushToCloud runs, what it sends, or how
-// saveAppDataFn/functions/index.js authorize it was touched, and every one of the ~30 existing
+// saveAppDataFn/the /data/save Worker endpoint authorize it was touched, and every one of the ~30 existing
 // fire-and-forget `save(true)` call sites keeps working unmodified: they simply don't look at the
 // resolved value, and the promise always RESOLVES (never rejects) so no site risks an unhandled
 // rejection just by upgrading to return a value.
@@ -782,8 +819,8 @@ function cloudSave(immediate = false){
   const payload = { json: jsonStr }; 
   const pushToCloud = () => {
     // Writes no longer go straight to Firestore — the security rules now deny that outright.
-    // Every save goes through the saveAppData Cloud Function, which re-checks role/downline
-    // authorization server-side before applying anything (see functions/index.js). A
+    // Every save goes through the /data/save Worker endpoint, which re-checks role/downline
+    // authorization server-side before applying anything (see cloudflare-worker/lib/authorization.js). A
     // permission-denied here is a real rejection, not a network blip: the local UI may now be
     // showing an edit that never actually persisted, so rather than silently drifting out of
     // sync with the server, reload to pull the true state back in.
@@ -794,8 +831,8 @@ function cloudSave(immediate = false){
         // client's full local DB is not the same thing as what getAppData() would hand back
         // (a non-superadmin's view is a filtered subset), so treating the two as equivalent
         // would make every subsequent fetch look like "the cloud has new data" even when
-        // nothing actually changed. This save already bumped the meta doc (see
-        // functions/index.js), so fetchAuthorizedData() will fire shortly and reconcile
+        // nothing actually changed. This save already bumped the meta doc (see bumpMeta() in
+        // cloudflare-worker/lib/googleFirestore.js), so fetchAuthorizedData() will fire shortly and reconcile
         // lastCloudJson/mm_last_base_json against the real authorized view itself.
         return {ok:true};
     }).catch(e=>{
@@ -860,8 +897,8 @@ function ensure(allowAutoFix = false){
   if(!DB.settings.afreshFlavors) DB.settings.afreshFlavors = ["Lemon","Wild Berry"];
   // PHASE 6 — this recovery-account injection is now explicitly gated to offline/local-file-test
   // mode (`!firebaseAvailable`). Reason: as of this phase, an online, non-privileged caller's
-  // `DB.users` is a genuine, server-authorized DOWNLINE-FILTERED SUBSET (see getAppData in
-  // functions/index.js) — it legitimately contains no 'superadmin' entry for most such callers,
+  // `DB.users` is a genuine, server-authorized DOWNLINE-FILTERED SUBSET (see buildAuthorizedView
+  // in cloudflare-worker/lib/authorization.js) — it legitimately contains no 'superadmin' entry for most such callers,
   // and that is not evidence that no superadmin account exists org-wide. Firing this locally
   // online would fabricate a phantom local account (never persisted — saveAppData now silently
   // drops a non-superadmin's `users` field, so it can't leak into the real document either, but
@@ -1505,11 +1542,11 @@ function finishRankChange(oldType, newType, id, loginInfo) {
      - the Settings page no longer offers a way to turn it on (see renderSettings()),
      - tryBiometricLogin() is a hard no-op below, so even a direct call (console, old cached
        page, etc.) cannot authenticate anyone.
-   Re-enabling this requires a real server-side WebAuthn implementation first: a Cloud
-   Function that issues and stores a server-generated challenge, verifies the signature
+   Re-enabling this requires a real server-side WebAuthn implementation first: a server-side
+   endpoint that issues and stores a server-generated challenge, verifies the signature
    against a server-stored public key (e.g. via @simplewebauthn/server), and checks the
    signature counter — the same trust model already used for PIN login via the `login`
-   Cloud Function. Until that exists, this stays off. Phase 1/Phase 2 server-side auth
+   Worker endpoint. Until that exists, this stays off. Phase 1/Phase 2 server-side auth
    protections (rate limiting, token revocation checks, etc.) are unrelated and unchanged. */
 async function biometricSupported(){
   return false; // disabled — see block comment above
@@ -1686,7 +1723,7 @@ window.doLogin = async () => {
   // Local-file testing / fully offline mode has no server to call (see the isLocalFileTest
   // guardrail above) — it falls back to comparing against whatever's in the local DB copy,
   // same as before. This path never talks to production Firestore either way. Online, the
-  // PIN is always checked server-side (see the `login` Cloud Function) — the client never
+  // PIN is always checked server-side (see the `login` Worker endpoint) — the client never
   // sees or compares a real PIN again.
   if(!firebaseAvailable){
     const foundUser = DB.users.find(u => u.username.toLowerCase() === userVal.toLowerCase());
@@ -4075,7 +4112,7 @@ function renderAdmin(){
              else if(foundCoach) linkedName = "Coach: " + foundCoach.name;
         }
 
-        // PINs are no longer held client-side at all (see functions/index.js) — nothing to
+        // PINs are no longer held client-side at all (see cloudflare-worker/login-worker.js) — nothing to
         // show here but a mask. Use "Reset PIN" to issue a new one when needed.
         const displayPin = '••••';
 

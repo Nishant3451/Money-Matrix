@@ -1,49 +1,45 @@
 // ============================================================================================
-// MoneyMatrix login endpoint — Cloudflare Worker replacement for the Firebase `login` callable.
+// MoneyMatrix backend Worker -- Cloudflare Worker replacement for Firebase Cloud Functions.
 //
-// WHY THIS EXISTS: deploying ANY Firebase Cloud Function (including the existing `login` in
-// functions/index.js) requires the project to be on the Blaze (pay-as-you-go) plan — Cloud
-// Functions cannot be deployed at all on Spark, even for usage that would stay entirely within
-// the free quota. That is the root cause of the production 404/CORS failure: the `login`
-// function was never actually deployable on money-metrix-9f1da while it stays on Spark. See
-// the diagnosis conversation for the reasoning; this file is the fix, not a random rewrite.
+// WHY THIS EXISTS: deploying ANY Firebase Cloud Function requires the Blaze (pay-as-you-go)
+// plan -- Cloud Functions cannot be deployed at all on Spark, even within the free quota. That
+// was already the root cause of the original `login` 404/CORS failure (fixed by moving login
+// here). The SAME root cause was silently still breaking the app after login: the frontend's
+// getAppData/saveAppData/setUserPin calls were still httpsCallable() references to Cloud
+// Functions that could never actually be deployed -- functions/index.js does not exist anywhere
+// in this repository (confirmed: no such file, no functions/ directory, and this repo has no
+// git history to recover it from). Every post-login data call was failing, which is exactly
+// the "Sync error -- check network" symptom. This file now serves ALL THREE of those endpoints,
+// not just login, using the same Worker/service-account architecture.
 //
-// This Worker is the ONLY thing that changes. It does not touch setUserPin / saveAppData /
-// getAppData, firestore.rules, or the app's data model. It reproduces the exact behavior of
-// exports.login from functions/index.js:
-//   1. Same input validation (username + pin required).
-//   2. Same server-side rate limiting shape (5 attempts, exponential backoff, per-username AND
-//      per-IP), see the KV-based caveat below — this is the one place the port is NOT a
-//      byte-for-byte equivalent, and that difference is called out rather than hidden.
-//   3. Same Firestore documents (moneymatrix/appData, moneymatrix/credentials), read via the
-//      Firestore REST API using a service-account-signed OAuth2 token instead of the Admin SDK
-//      (the Admin SDK needs a Node server; the REST API is what it calls under the hood).
-//   4. Same bcrypt compare against a fixed dummy hash when the user/credential doesn't exist,
-//      preserving the timing-safety property.
-//   5. Same success response shape: { token, user: { id, username, role, linkedId } }, where
-//      `token` is a Firebase custom auth token the client hands to signInWithCustomToken() —
-//      exactly as merged.html already does. No frontend change needed beyond calling this URL
-//      instead of the callable (see cloudflare-worker/README.md).
-//   6. Same claims-persistence step (setCustomUserClaims-equivalent) so the role/approved
-//      claims survive the client's automatic hourly token refresh, not just the first token.
-//
-// WHAT IS GENUINELY DIFFERENT (disclosed, not hidden):
-//   - Rate limiting uses Cloudflare KV instead of a Firestore transaction. KV is NOT strongly
-//     consistent and has no cross-key transaction — under a very tight burst of truly parallel
-//     requests, a few more than 5 attempts could land before the lockout catches up, more so
-//     than the original Firestore-transaction version. It is still a real, server-side,
-//     un-bypassable-by-the-client cap; it just isn't as tight under extreme parallelism as the
-//     Firestore version. Flagged explicitly, same as the original file flags its own
-//     TOCTOU-adjacent caveats.
-//   - This file has NOT been executed against live Firestore, live Google OAuth2 token
-//     endpoints, or live Identity Toolkit endpoints from this environment (no network access
-//     here). The request/response shapes below are built to the documented Google Identity
-//     Toolkit / Firestore REST API contracts and mirror what the Firebase Admin SDK does
-//     internally, but treat this as implemented-with-high-confidence, not verified — smoke-test
-//     the four flows in the README's "manual verification" section right after deploying.
+// SECURITY MODEL (see cloudflare-worker/lib/authorization.js for the full write-up):
+//   - firestore.rules already deny ALL direct client access to moneymatrix/appData and
+//     moneymatrix/credentials (`allow read, write: if false`) -- that boundary is UNCHANGED.
+//   - Every protected endpoint below requires `Authorization: Bearer <Firebase ID token>` (NOT
+//     the custom token -- the ID token Firebase hands back after signInWithCustomToken()).
+//   - The caller's identity/role/approval are taken ONLY from the verified token's claims, and
+//     linkedId is taken ONLY from the caller's own record in the server's copy of appData --
+//     never from anything the client sends in the request body.
+//   - getAppData/saveAppData reconstruct the read/write scoping (downline filtering, perUser
+//     isolation, users control-plane restrictions, activityLog append-only, etc.) that used to
+//     live in functions/index.js -- see lib/authorization.js's top comment for exactly what is a
+//     verbatim port of existing client logic vs. genuinely new code, and why.
 // ============================================================================================
 
 import bcrypt from "bcryptjs";
+import {
+  getGoogleAccessToken,
+  readAppData,
+  writeAppData,
+  bumpMeta,
+  readCredentials,
+  writeCredentials,
+  firestoreDeleteFields,
+} from "./lib/googleFirestore.js";
+import { mintFirebaseCustomToken, setClaimsEnsuringUserExists, deleteAuthUser, revokeRefreshTokens } from "./lib/firebaseIdentity.js";
+import { verifyFirebaseIdToken } from "./lib/firebaseToken.js";
+import { buildAuthorizedView, mergeAuthorizedSave } from "./lib/authorization.js";
+import { authorizeSetUserPin } from "./lib/userPin.js";
 
 const MAX_PIN_LENGTH = 16;
 const BCRYPT_ROUNDS = 10;
@@ -51,232 +47,13 @@ const MAX_ATTEMPTS_BEFORE_LOCK = 5;
 const BASE_LOCK_SECONDS = 30;
 const MAX_LOCK_SECONDS = 15 * 60;
 const ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
-const CUSTOM_TOKEN_AUDIENCE =
-  "https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit";
-const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-const OAUTH_SCOPE =
-  "https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/identitytoolkit";
 
-// Precomputed once per isolate (mirrors the original file's module-scope DUMMY_HASH) — a real
-// bcrypt.compare against this fixed hash is what makes "no such account" take the same time as
-// "wrong PIN".
+// Precomputed once per isolate -- a real bcrypt.compare against this fixed hash is what makes
+// "no such account" take the same time as "wrong PIN" (timing-safety).
 const DUMMY_HASH = '$2a$12$WYqt7KhvBYA/n3dNGZsuaOwQYOS9PIP8RXWA0F1RUxJHP64bK8lhG';
 
-// In-isolate cache for the Google OAuth2 access token, so a burst of requests hitting the same
-// warm isolate doesn't re-mint a fresh token every time. Best-effort only — a cold isolate
-// always fetches a fresh one. Never persisted to KV (no reason to let a bearer token outlive
-// the isolate that fetched it).
-let cachedAccessToken = null; // { token, expiresAt }
-
 // -------------------------------------------------------------------------------------------
-// Small standalone helpers (no Node APIs — everything here must run in a Workers V8 isolate).
-// -------------------------------------------------------------------------------------------
-
-function base64UrlFromBytes(bytes) {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function base64UrlFromString(str) {
-  return base64UrlFromBytes(new TextEncoder().encode(str));
-}
-
-function pemToDer(pem) {
-  const b64 = pem
-    .replace(/-----BEGIN PRIVATE KEY-----/, "")
-    .replace(/-----END PRIVATE KEY-----/, "")
-    .replace(/\s+/g, "");
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-}
-
-async function importServiceAccountKey(pemPrivateKey) {
-  const der = pemToDer(pemPrivateKey);
-  return crypto.subtle.importKey(
-    "pkcs8",
-    der,
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-}
-
-// Signs a compact RS256 JWT. `header`/`payload` are plain objects; `key` is a CryptoKey from
-// importServiceAccountKey(). Used both for the Google OAuth2 JWT-bearer assertion and for
-// minting the Firebase custom token itself — both are just RS256 JWTs signed by the same
-// service-account private key, per Google's documented custom-token format.
-async function signJwtRS256(header, payload, key) {
-  const encHeader = base64UrlFromString(JSON.stringify(header));
-  const encPayload = base64UrlFromString(JSON.stringify(payload));
-  const signingInput = `${encHeader}.${encPayload}`;
-  const sig = await crypto.subtle.sign(
-    { name: "RSASSA-PKCS1-v1_5" },
-    key,
-    new TextEncoder().encode(signingInput)
-  );
-  return `${signingInput}.${base64UrlFromBytes(new Uint8Array(sig))}`;
-}
-
-async function sha256Hex(str) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-// Converts one Firestore REST "Value" object into a plain JS value. Only the shapes this app
-// actually stores are handled; anything else falls back to `null` rather than throwing, so an
-// unexpected field can't take the whole login down.
-function decodeFirestoreValue(value) {
-  if (!value) return null;
-  if ("stringValue" in value) return value.stringValue;
-  if ("integerValue" in value) return Number(value.integerValue);
-  if ("doubleValue" in value) return value.doubleValue;
-  if ("booleanValue" in value) return value.booleanValue;
-  if ("nullValue" in value) return null;
-  if ("mapValue" in value) return decodeFirestoreFields(value.mapValue.fields || {});
-  if ("arrayValue" in value) return (value.arrayValue.values || []).map(decodeFirestoreValue);
-  return null;
-}
-function decodeFirestoreFields(fields) {
-  const out = {};
-  for (const key of Object.keys(fields || {})) out[key] = decodeFirestoreValue(fields[key]);
-  return out;
-}
-
-// -------------------------------------------------------------------------------------------
-// Google OAuth2 (service-account JWT-bearer flow) — this is what lets a Worker, which cannot
-// run the Firebase Admin SDK, still call Firestore/Identity Toolkit with admin privileges.
-// -------------------------------------------------------------------------------------------
-
-async function getGoogleAccessToken(env) {
-  const now = Math.floor(Date.now() / 1000);
-  if (cachedAccessToken && cachedAccessToken.expiresAt - 60 > now) {
-    return cachedAccessToken.token;
-  }
-  const key = await importServiceAccountKey(env.FIREBASE_PRIVATE_KEY);
-  const assertion = await signJwtRS256(
-    { alg: "RS256", typ: "JWT" },
-    {
-      iss: env.FIREBASE_CLIENT_EMAIL,
-      scope: OAUTH_SCOPE,
-      aud: GOOGLE_TOKEN_ENDPOINT,
-      iat: now,
-      exp: now + 3600,
-    },
-    key
-  );
-  const resp = await fetch(GOOGLE_TOKEN_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion,
-    }),
-  });
-  if (!resp.ok) {
-    throw new Error(`Google OAuth2 token exchange failed (${resp.status})`);
-  }
-  const json = await resp.json();
-  cachedAccessToken = { token: json.access_token, expiresAt: now + (json.expires_in || 3600) };
-  return cachedAccessToken.token;
-}
-
-async function firestoreGetDoc(env, accessToken, docPath) {
-  const url = `https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/${docPath}`;
-  const resp = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-  if (resp.status === 404) return {}; // doc doesn't exist yet — same as snap.exists === false
-  if (!resp.ok) throw new Error(`Firestore read failed for ${docPath} (${resp.status})`);
-  const json = await resp.json();
-  return decodeFirestoreFields(json.fields || {});
-}
-
-// Mirrors readAppData() in functions/index.js: the whole app state lives in one string field
-// called `json` on moneymatrix/appData, not as top-level document fields.
-async function readAppData(env, accessToken) {
-  const doc = await firestoreGetDoc(env, accessToken, "moneymatrix/appData");
-  try {
-    return JSON.parse(doc.json || "{}");
-  } catch (e) {
-    return {};
-  }
-}
-
-// -------------------------------------------------------------------------------------------
-// Firebase custom-token minting + custom-claims persistence — both admin-only operations that
-// the Admin SDK normally does locally / via Identity Toolkit. Done here by hand since there is
-// no Admin SDK available outside a Node process.
-// -------------------------------------------------------------------------------------------
-
-async function mintFirebaseCustomToken(env, uid, claims) {
-  const key = await importServiceAccountKey(env.FIREBASE_PRIVATE_KEY);
-  const now = Math.floor(Date.now() / 1000);
-  return signJwtRS256(
-    { alg: "RS256", typ: "JWT" },
-    {
-      iss: env.FIREBASE_CLIENT_EMAIL,
-      sub: env.FIREBASE_CLIENT_EMAIL,
-      aud: CUSTOM_TOKEN_AUDIENCE,
-      iat: now,
-      exp: now + 3600,
-      uid,
-      claims,
-    },
-    key
-  );
-}
-
-// Mirrors setClaimsEnsuringUserExists() in functions/index.js: sets custom claims on the
-// Identity Platform user record so they survive the client's automatic hourly token refresh
-// (a one-time custom token's claims do NOT — see the long comment on this in the original
-// file). Creates the Auth user record first if this is genuinely their first-ever login.
-async function setClaimsEnsuringUserExists(env, accessToken, uid, claims) {
-  const base = `https://identitytoolkit.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}`;
-  const updateResp = await fetch(`${base}/accounts:update`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ localId: uid, customAttributes: JSON.stringify(claims) }),
-  });
-  if (updateResp.ok) return;
-
-  const errBody = await updateResp.json().catch(() => ({}));
-  const isNotFound = errBody?.error?.message?.includes("USER_NOT_FOUND");
-  if (!isNotFound) {
-    throw new Error(`accounts:update failed (${updateResp.status}): ${JSON.stringify(errBody)}`);
-  }
-
-  const createResp = await fetch(`${base}/accounts:signUp`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ localId: uid }),
-  });
-  if (!createResp.ok) {
-    const createErr = await createResp.json().catch(() => ({}));
-    // uid may already exist despite the race above (two first-logins at once) — that's fine,
-    // fall through to the retry below either way.
-    if (!createErr?.error?.message?.includes("DUPLICATE_LOCAL_ID")) {
-      throw new Error(`accounts:signUp failed (${createResp.status}): ${JSON.stringify(createErr)}`);
-    }
-  }
-
-  const retryResp = await fetch(`${base}/accounts:update`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ localId: uid, customAttributes: JSON.stringify(claims) }),
-  });
-  if (!retryResp.ok) {
-    const retryErr = await retryResp.json().catch(() => ({}));
-    throw new Error(`accounts:update retry failed (${retryResp.status}): ${JSON.stringify(retryErr)}`);
-  }
-}
-
-// -------------------------------------------------------------------------------------------
-// Rate limiting — same window/backoff MATH as functions/index.js's nextFailedAttemptState(),
-// ported unchanged. Storage backend (KV vs. a Firestore transaction) is the disclosed
-// difference — see the file-level comment at the top.
+// Rate limiting (login only) -- unchanged from the original login-only version of this file.
 // -------------------------------------------------------------------------------------------
 
 function nextFailedAttemptState(state, now) {
@@ -296,7 +73,9 @@ function nextFailedAttemptState(state, now) {
 }
 
 async function kvKey(kind, value) {
-  return `rl:${kind}:${await sha256Hex(String(value))}`;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value)));
+  const hex = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `rl:${kind}:${hex}`;
 }
 
 async function reserveLoginAttempt(env, usernameKey, ip) {
@@ -344,7 +123,7 @@ function corsHeaders(env, request) {
   if (origin && allowed.includes(origin)) {
     headers["Access-Control-Allow-Origin"] = origin;
     headers["Access-Control-Allow-Methods"] = "POST, OPTIONS";
-    headers["Access-Control-Allow-Headers"] = "Content-Type";
+    headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
     headers["Access-Control-Max-Age"] = "86400";
   }
   return headers;
@@ -357,12 +136,267 @@ function jsonResponse(body, status, headers) {
   });
 }
 
-// Every error the client sees is this generic shape — never "no such user", never a stack
-// trace, never which internal step failed. Same "don't leak which check failed" property the
-// original HttpsError-based errors had.
+// Every error the client sees is this generic shape -- never a stack trace, never which
+// internal step failed, never sensitive data.
 function authError(message, status, headers) {
   return jsonResponse({ error: { message } }, status, headers);
 }
+
+// -------------------------------------------------------------------------------------------
+// Shared auth: verifies the bearer ID token and resolves { uid, role } -- never trusts anything
+// from the request body for identity/authorization.
+// -------------------------------------------------------------------------------------------
+
+async function authenticateRequest(request, env) {
+  const header = request.headers.get("Authorization") || "";
+  const m = header.match(/^Bearer (.+)$/);
+  if (!m) return { error: { message: "Missing authorization", status: 401 } };
+  try {
+    const { uid, claims } = await verifyFirebaseIdToken(m[1], env.FIREBASE_PROJECT_ID);
+    if (claims.approved !== true) return { error: { message: "Account not approved", status: 403 } };
+    return { uid, role: claims.role || "user" };
+  } catch (e) {
+    // Never leak *why* verification failed (expired vs malformed vs wrong project, etc.) --
+    // the client-side behavior for all of these is the same: treat the session as invalid and
+    // re-authenticate.
+    return { error: { message: "Invalid or expired session", status: 401 } };
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// POST /login -- UNCHANGED behavior from the original login-only version of this Worker.
+// -------------------------------------------------------------------------------------------
+
+async function handleLogin(request, env, cors) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return authError("Username and PIN are required", 400, cors);
+  }
+
+  const username = String(body?.username || "").trim();
+  const pin = String(body?.pin || "").trim();
+  if (!username || !pin) {
+    return authError("Username and PIN are required", 400, cors);
+  }
+  if (pin.length > MAX_PIN_LENGTH) {
+    return authError("Invalid username or PIN", 400, cors);
+  }
+
+  const usernameKey = username.toLowerCase();
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+
+  try {
+    const { locked } = await reserveLoginAttempt(env, usernameKey, ip);
+    if (locked) {
+      return authError("Too many attempts -- please wait and try again.", 429, cors);
+    }
+
+    const accessToken = await getGoogleAccessToken(env);
+    const [appData, credsDoc] = await Promise.all([
+      readAppData(env, accessToken),
+      readCredentials(env, accessToken),
+    ]);
+
+    const users = appData.users || [];
+    const user = users.find((u) => (u.username || "").toLowerCase() === usernameKey);
+    const entry = user ? credsDoc[user.id] || null : null;
+
+    const hashToCheck = entry && entry.pinHash ? entry.pinHash : DUMMY_HASH;
+    const compareOk = await bcrypt.compare(pin, hashToCheck);
+    const ok = compareOk && !!user && !!(entry && entry.pinHash);
+
+    await finalizeLoginAttempt(env, usernameKey, ip, ok);
+
+    if (!ok) {
+      return authError("Invalid username or PIN", 401, cors);
+    }
+
+    const role = entry.role || user.role || "user";
+    const claims = { approved: true, role };
+
+    await setClaimsEnsuringUserExists(env, accessToken, user.id, claims);
+    const token = await mintFirebaseCustomToken(env, user.id, claims);
+
+    return jsonResponse(
+      {
+        token,
+        user: { id: user.id, username: user.username, role, linkedId: user.linkedId || null },
+      },
+      200,
+      cors
+    );
+  } catch (e) {
+    console.error("login worker error:", e && e.stack ? e.stack : e);
+    return authError("Invalid username or PIN", 401, cors);
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// POST /data/get -- replaces the getAppData callable.
+// -------------------------------------------------------------------------------------------
+
+async function handleDataGet(request, env, cors) {
+  const auth = await authenticateRequest(request, env);
+  if (auth.error) return authError(auth.error.message, auth.error.status, cors);
+
+  try {
+    const accessToken = await getGoogleAccessToken(env);
+    const fullData = await readAppData(env, accessToken);
+    const me = (fullData.users || []).find((u) => u.id === auth.uid);
+    if (!me) return authError("Account not found", 403, cors);
+    const view = buildAuthorizedView(fullData, { uid: auth.uid, role: auth.role, linkedId: me.linkedId || null });
+    return jsonResponse({ data: { json: JSON.stringify(view) } }, 200, cors);
+  } catch (e) {
+    console.error("data/get error:", e && e.stack ? e.stack : e);
+    return authError("Could not load data", 500, cors);
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// POST /data/save -- replaces the saveAppData callable.
+//
+// KNOWN LIMITATION (disclosed, not hidden -- same practice as the KV rate-limit caveat above):
+// this is a read-then-write against Firestore, not a transaction. Two saves landing in the same
+// few hundred milliseconds (e.g. two devices signed in as the same account, or a save racing a
+// setUserPin-triggered users-list update) could still clobber each other's non-overlapping
+// changes. This is a real gap versus a Firestore-transaction implementation, called out
+// explicitly rather than silently shipped as if it were fully solved.
+// -------------------------------------------------------------------------------------------
+
+async function handleDataSave(request, env, cors) {
+  const auth = await authenticateRequest(request, env);
+  if (auth.error) return authError(auth.error.message, auth.error.status, cors);
+
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return authError("Invalid payload", 400, cors);
+  }
+  if (typeof body?.json !== "string") return authError("Invalid payload", 400, cors);
+  let submitted;
+  try {
+    submitted = JSON.parse(body.json);
+  } catch (e) {
+    return authError("Invalid payload", 400, cors);
+  }
+
+  try {
+    const accessToken = await getGoogleAccessToken(env);
+    const serverData = await readAppData(env, accessToken);
+    const me = (serverData.users || []).find((u) => u.id === auth.uid);
+    if (!me) return authError("Account not found", 403, cors);
+
+    const merged = mergeAuthorizedSave(serverData, submitted, {
+      uid: auth.uid,
+      role: auth.role,
+      linkedId: me.linkedId || null,
+    });
+    await writeAppData(env, accessToken, merged);
+    await bumpMeta(env, accessToken);
+    return jsonResponse({ data: { ok: true } }, 200, cors);
+  } catch (e) {
+    console.error("data/save error:", e && e.stack ? e.stack : e);
+    return authError("Could not save data", 500, cors);
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// POST /user/setPin -- replaces the setUserPin callable.
+// -------------------------------------------------------------------------------------------
+
+async function handleSetUserPin(request, env, cors) {
+  const auth = await authenticateRequest(request, env);
+  if (auth.error) return authError(auth.error.message, auth.error.status, cors);
+
+  let payload;
+  try {
+    payload = await request.json();
+  } catch (e) {
+    return authError("Invalid payload", 400, cors);
+  }
+  const targetUserId = String(payload?.targetUserId || "").trim();
+  if (!targetUserId) return authError("targetUserId is required", 400, cors);
+  if (payload?.newPin && String(payload.newPin).length > MAX_PIN_LENGTH) {
+    return authError("PIN too long", 400, cors);
+  }
+
+  try {
+    const accessToken = await getGoogleAccessToken(env);
+    const [appData, credsDoc] = await Promise.all([
+      readAppData(env, accessToken),
+      readCredentials(env, accessToken),
+    ]);
+    const targetUser = (appData.users || []).find((u) => u.id === targetUserId) || null;
+
+    const decision = authorizeSetUserPin({ uid: auth.uid, role: auth.role }, targetUser, payload);
+    if (!decision.ok) return authError(decision.error, 403, cors);
+
+    if (decision.op === "self") {
+      const entry = credsDoc[targetUserId];
+      const hashToCheck = entry && entry.pinHash ? entry.pinHash : DUMMY_HASH;
+      const currentOk = await bcrypt.compare(String(payload.currentPin), hashToCheck);
+      if (!currentOk || !entry) return authError("Current PIN is incorrect", 401, cors);
+      const newHash = await bcrypt.hash(String(payload.newPin), BCRYPT_ROUNDS);
+      await writeCredentials(env, accessToken, { [targetUserId]: { pinHash: newHash, role: entry.role } });
+      // Revoke any OTHER session still running with the old PIN (see revokeRefreshTokens'
+      // doc comment for exactly what this does and doesn't guarantee instantly).
+      await revokeRefreshTokens(env, accessToken, targetUserId);
+      return jsonResponse({ data: { ok: true } }, 200, cors);
+    }
+
+    if (decision.op === "delete") {
+      await firestoreDeleteFields(env, accessToken, "moneymatrix/credentials", [targetUserId]);
+      await deleteAuthUser(env, accessToken, targetUserId);
+      const remainingUsers = (appData.users || []).filter((u) => u.id !== targetUserId);
+      const remainingProfiles = { ...(appData.profiles || {}) };
+      delete remainingProfiles[targetUserId];
+      const remainingPerUser = { ...(appData.perUser || {}) };
+      delete remainingPerUser[targetUserId];
+      await writeAppData(env, accessToken, { ...appData, users: remainingUsers, profiles: remainingProfiles, perUser: remainingPerUser });
+      await bumpMeta(env, accessToken);
+      return jsonResponse({ data: { ok: true } }, 200, cors);
+    }
+
+    // create / update
+    const role = payload.role || (targetUser ? targetUser.role : "user");
+    const newHash = payload.newPin ? await bcrypt.hash(String(payload.newPin), BCRYPT_ROUNDS) : (credsDoc[targetUserId] || {}).pinHash;
+    if (!newHash) return authError("newPin is required", 400, cors);
+
+    await writeCredentials(env, accessToken, { [targetUserId]: { pinHash: newHash, role } });
+    await setClaimsEnsuringUserExists(env, accessToken, targetUserId, { approved: true, role });
+    if (targetUser && payload.newPin) {
+      // Admin reset an existing account's PIN — revoke that account's other sessions the same
+      // way a self-service change does.
+      await revokeRefreshTokens(env, accessToken, targetUserId);
+    }
+
+    if (!targetUser) {
+      // Brand-new account: give it an empty users entry so a concurrent getAppData right after
+      // this call already sees it. The frontend still also does its own local bookkeeping for
+      // the fields it manages (displayName, linkedId, etc.) via the normal saveAppData path
+      // immediately after this call succeeds.
+      const newUsers = [...(appData.users || []), { id: targetUserId, username: targetUserId, role, linkedId: payload.linkedId || null }];
+      await writeAppData(env, accessToken, { ...appData, users: newUsers });
+      await bumpMeta(env, accessToken);
+    } else if (payload.role && payload.role !== targetUser.role) {
+      const newUsers = (appData.users || []).map((u) => (u.id === targetUserId ? { ...u, role } : u));
+      await writeAppData(env, accessToken, { ...appData, users: newUsers });
+      await bumpMeta(env, accessToken);
+    }
+
+    return jsonResponse({ data: { ok: true } }, 200, cors);
+  } catch (e) {
+    console.error("user/setPin error:", e && e.stack ? e.stack : e);
+    return authError("Could not complete this operation", 500, cors);
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// Router
+// -------------------------------------------------------------------------------------------
 
 export default {
   async fetch(request, env, ctx) {
@@ -375,68 +409,19 @@ export default {
       return authError("Method not allowed", 405, cors);
     }
 
-    let body;
-    try {
-      body = await request.json();
-    } catch (e) {
-      return authError("Username and PIN are required", 400, cors);
-    }
-
-    const username = String(body?.username || "").trim();
-    const pin = String(body?.pin || "").trim();
-    if (!username || !pin) {
-      return authError("Username and PIN are required", 400, cors);
-    }
-    if (pin.length > MAX_PIN_LENGTH) {
-      return authError("Invalid username or PIN", 400, cors);
-    }
-
-    const usernameKey = username.toLowerCase();
-    const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-
-    try {
-      const { locked } = await reserveLoginAttempt(env, usernameKey, ip);
-      if (locked) {
-        return authError("Too many attempts — please wait and try again.", 429, cors);
-      }
-
-      const accessToken = await getGoogleAccessToken(env);
-      const [appData, credsDoc] = await Promise.all([
-        readAppData(env, accessToken),
-        firestoreGetDoc(env, accessToken, "moneymatrix/credentials"),
-      ]);
-
-      const users = appData.users || [];
-      const user = users.find((u) => (u.username || "").toLowerCase() === usernameKey);
-      const entry = user ? credsDoc[user.id] || null : null;
-
-      const hashToCheck = entry && entry.pinHash ? entry.pinHash : DUMMY_HASH;
-      const compareOk = await bcrypt.compare(pin, hashToCheck);
-      const ok = compareOk && !!user && !!(entry && entry.pinHash);
-
-      await finalizeLoginAttempt(env, usernameKey, ip, ok);
-
-      if (!ok) {
-        return authError("Invalid username or PIN", 401, cors);
-      }
-
-      const role = entry.role || user.role || "user";
-      const claims = { approved: true, role };
-
-      await setClaimsEnsuringUserExists(env, accessToken, user.id, claims);
-      const token = await mintFirebaseCustomToken(env, user.id, claims);
-
-      return jsonResponse(
-        {
-          token,
-          user: { id: user.id, username: user.username, role, linkedId: user.linkedId || null },
-        },
-        200,
-        cors
-      );
-    } catch (e) {
-      console.error("login worker error:", e && e.stack ? e.stack : e);
-      return authError("Invalid username or PIN", 401, cors);
+    const url = new URL(request.url);
+    switch (url.pathname) {
+      case "/login":
+      case "/": // preserved for backwards compatibility with the deployed login-only URL
+        return handleLogin(request, env, cors);
+      case "/data/get":
+        return handleDataGet(request, env, cors);
+      case "/data/save":
+        return handleDataSave(request, env, cors);
+      case "/user/setPin":
+        return handleSetUserPin(request, env, cors);
+      default:
+        return authError("Not found", 404, cors);
     }
   },
 };

@@ -7,5 +7,13 @@ FIREBASE_PROJECT_ID = "money-metrix-9f1da"
 # Comma-separated list if you ever need more than one allowed origin (e.g. a local dev server).
 ALLOWED_ORIGIN = "https://nishant3451.github.io"
 
-# Create with: wrangler kv namespace create RATE_LIMIT_KV
-# Then paste the returned id below.
+# NOTE ON THIS ID: I cannot verify from this environment that the id below corresponds to a
+# real KV namespace in your Cloudflare account — I have no network access to Cloudflare's API
+# here, and no prior tool call in this conversation ever created or returned this id; it's only
+# known to me because it was supplied in a chat message. Confirm it yourself before deploying:
+#   npx wrangler kv namespace list
+# If it doesn't match (or doesn't exist), create a fresh one and replace the id:
+#   npx wrangler kv namespace create RATE_LIMIT_KV
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "fbd9ccbb9742472dbda24ac023425c78"

@@ -2,9 +2,11 @@
   "name": "moneymatrix-login-worker",
   "private": true,
   "version": "1.0.0",
+  "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test": "node --test cloudflare-worker/tests/*.test.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3"
