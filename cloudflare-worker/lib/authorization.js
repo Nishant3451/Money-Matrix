@@ -131,12 +131,38 @@ export function buildAuthorizedView(fullData, caller) {
     userPermissions: full
       ? fullData.userPermissions || {}
       : { [uid]: (fullData.userPermissions || {})[uid] || {} },
+    // ---- Privacy system (Part B) ----
+    // policyVersions: published versions are visible to everyone (a user must be able to read
+    // the policy they're asked to accept); admins additionally see drafts so they can review
+    // before publishing. Never exposes anything else.
+    policyVersions: full
+      ? fullData.policyVersions || []
+      : (fullData.policyVersions || []).filter((p) => p.status === "published"),
+    // consent/preferences/policyAcceptances: same self-only-unless-admin shape as perUser.
+    privacyConsents: full
+      ? fullData.privacyConsents || {}
+      : { [uid]: (fullData.privacyConsents || {})[uid] || [] },
+    privacyPreferences: full
+      ? fullData.privacyPreferences || {}
+      : { [uid]: (fullData.privacyPreferences || {})[uid] || { essential: true } },
+    policyAcceptances: full
+      ? fullData.policyAcceptances || {}
+      : { [uid]: (fullData.policyAcceptances || {})[uid] || {} },
+    // privacyRequests: a non-admin only ever sees their own requests, never another user's.
+    privacyRequests: full
+      ? fullData.privacyRequests || []
+      : (fullData.privacyRequests || []).filter((r) => r.uid === uid),
+    // privacyAuditLog: admin-only. Exposing every user's privacy actions to every other user
+    // would itself be a privacy leak, so non-admins get nothing here (not even their own
+    // entries) rather than a filtered view — the audit trail is an oversight tool, not a
+    // per-user activity feed (that's what activityLog is for).
+    privacyAuditLog: full ? fullData.privacyAuditLog || [] : [],
   };
   return out;
 }
 
 export function emptyPerUserBucket() {
-  return { transactions: [], members: [], gifts: [], coaches: [], supervisors: [], custom: {}, products: [], quotations: [] };
+  return { transactions: [], members: [], gifts: [], coaches: [], supervisors: [], custom: {}, products: [], quotations: [], clients: [] };
 }
 
 /**
@@ -161,7 +187,7 @@ export function mergeAuthorizedSave(serverData, submitted, caller) {
     // let even an admin overwrite the credentials doc (that's a separate document entirely and
     // is never part of appData in the first place).
     return {
-      users: Array.isArray(submitted.users) ? submitted.users : serverData.users || [],
+      users: sanitizeUsersForFullAccessSave(serverData.users, submitted.users, role),
       profiles: isPlainObject(submitted.profiles) ? submitted.profiles : serverData.profiles || {},
       settings: isPlainObject(submitted.settings) ? submitted.settings : serverData.settings || {},
       permissions: isPlainObject(submitted.permissions) ? submitted.permissions : serverData.permissions || {},
@@ -170,6 +196,13 @@ export function mergeAuthorizedSave(serverData, submitted, caller) {
       shared: isPlainObject(submitted.shared) ? submitted.shared : serverData.shared || {},
       perUser: isPlainObject(submitted.perUser) ? submitted.perUser : serverData.perUser || {},
       activityLog: mergeActivityLog(serverData.activityLog, submitted.activityLog, () => true),
+      // Privacy fields (Part B): ALWAYS carried forward from the server's existing state,
+      // for every caller including admin/superadmin. These are only ever mutated by the
+      // dedicated /privacy/* endpoints, which apply one narrow, validated, audited change at a
+      // time — never by a generic "whole DB blob" save, even an admin's. This is what makes it
+      // safe that a consent/request record can never be silently dropped, forged, or
+      // overwritten by replaying/editing a saveAppData payload.
+      ...privacyPassthrough(serverData),
     };
   }
 
@@ -222,6 +255,23 @@ export function mergeAuthorizedSave(serverData, submitted, caller) {
     // Append-only: a scoped caller may add new entries scoped to their own downline, but can
     // never remove or rewrite existing entries (matches "activityLog append-only behavior").
     activityLog: mergeActivityLog(serverData.activityLog, submitted.activityLog, (a) => a.scopeId && downlineIds.has(a.scopeId)),
+    // See the full-access branch above for why these are always passed through untouched.
+    ...privacyPassthrough(serverData),
+  };
+}
+
+/** The six Part-B privacy fields, always taken verbatim from the server's existing state and
+ * never from `submitted` — see the callers above for why. Centralized here so both branches of
+ * mergeAuthorizedSave stay symmetric and a future field can't be added to one and forgotten in
+ * the other. */
+function privacyPassthrough(serverData) {
+  return {
+    privacyConsents: serverData.privacyConsents || {},
+    policyVersions: serverData.policyVersions || [],
+    policyAcceptances: serverData.policyAcceptances || {},
+    privacyPreferences: serverData.privacyPreferences || {},
+    privacyRequests: serverData.privacyRequests || [],
+    privacyAuditLog: serverData.privacyAuditLog || [],
   };
 }
 
@@ -281,4 +331,76 @@ function activityKey(e) {
 
 function isPlainObject(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+// ----------------------------------------------------------------------------------------------
+// PHASE 6 FIX (privilege-escalation guard on the generic /data/save path):
+//
+// userPin.js's authorizeSetUserPin() enforces two invariants for the dedicated /user/setPin
+// endpoint: (1) only a superadmin caller may grant the "superadmin" role to anyone, and (2) a
+// non-superadmin (plain "admin") caller may never modify an existing superadmin's record at all.
+// Before this fix, mergeAuthorizedSave's full-access branch above accepted `submitted.users`
+// completely as-is for ANY full-access caller (admin OR superadmin), with no equivalent check —
+// so a caller with only "admin" claims could bypass both invariants simply by calling
+// POST /data/save with a hand-edited `users` array (e.g. setting their own record's `role` to
+// "superadmin", or rewriting an existing superadmin's row) instead of going through
+// /user/setPin. This does not by itself forge a Firebase ID token or its `role` custom claim
+// (which is what authenticateRequest actually trusts for the CURRENT request's authorization),
+// but it corrupts the authoritative `users` control-plane list that (a) the login endpoint falls
+// back to for role assignment whenever a credentials-doc entry's `role` is ever missing
+// (`entry.role || user.role` in handleLogin), (b) downline/scope computations and the admin UI
+// read as ground truth, and (c) is the exact invariant /user/setPin exists to protect — so
+// leaving one write path enforcing it and the other not is a real, exploitable inconsistency for
+// any account with mere "admin" claims (a lower-trust role than "superadmin" by design).
+//
+// Fix: apply the SAME two invariants here, mirroring authorizeSetUserPin's rules exactly, so a
+// non-superadmin full-access caller can freely edit ordinary users' non-role-sensitive fields
+// (matching existing admin capabilities) but can never (a) introduce or keep a "superadmin"-role
+// record, or (b) modify any existing superadmin's record in any way — both silently revert to
+// the server's existing value rather than hard-failing the whole save, consistent with this
+// function's existing "silently drop what you're not authorized to change" convention.
+function sanitizeUsersForFullAccessSave(serverUsers, submittedUsers, callerRole) {
+  serverUsers = Array.isArray(serverUsers) ? serverUsers : [];
+  if (callerRole === "superadmin") {
+    // Superadmin is the top of the hierarchy — no additional restriction beyond "must be an array".
+    return Array.isArray(submittedUsers) ? submittedUsers : serverUsers;
+  }
+  if (!Array.isArray(submittedUsers)) return serverUsers;
+
+  const serverById = new Map(serverUsers.map((u) => [u && u.id, u]));
+  const result = [];
+  const seen = new Set();
+
+  submittedUsers.forEach((u) => {
+    if (!u || u.id == null) return;
+    seen.add(u.id);
+    const existing = serverById.get(u.id);
+    if (existing && existing.role === "superadmin") {
+      // Existing superadmin record: a plain admin caller may not change it at all — keep the
+      // server's version untouched (mirrors "insufficient clearance to edit a superadmin
+      // account").
+      result.push(existing);
+      return;
+    }
+    if (u.role === "superadmin") {
+      // Attempt to grant/keep superadmin on a non-superadmin (or brand-new) record — reject just
+      // this role change, falling back to the server's existing role for that record (mirrors
+      // "only superadmin may grant the superadmin role"). For a brand-new record this means it
+      // is dropped to role "user" rather than superadmin, never silently discarded entirely.
+      result.push(existing ? { ...u, role: existing.role } : { ...u, role: "user" });
+      return;
+    }
+    result.push(u);
+  });
+
+  // Any existing user the caller's payload omitted entirely (e.g. a stale/partial client-side
+  // copy) is preserved as-is — the non-privileged branch below already treats omission as
+  // intentional deletion for scoped callers, but the full-access branch has always trusted the
+  // submitted array as the complete list; a superadmin-protected record must never disappear
+  // just because an admin's payload didn't include it.
+  serverUsers.forEach((u) => {
+    if (u && u.role === "superadmin" && !seen.has(u.id)) result.push(u);
+  });
+
+  return result;
 }

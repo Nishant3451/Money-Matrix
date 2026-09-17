@@ -356,6 +356,15 @@
   .form-group textarea{min-height:80px;resize:vertical}
   .phone-warn{color:var(--warning);font-size:.75rem;margin-top:-10px;margin-bottom:14px;display:flex;align-items:center;gap:6px;font-weight:600}
 
+  .client-combo{position:relative}
+  .client-combo-list{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);box-shadow:var(--shadow-lg);max-height:220px;overflow-y:auto;z-index:20}
+  .client-combo-item{padding:9px 13px;font-size:.88rem;font-weight:500;color:var(--text);cursor:pointer}
+  .client-combo-item:hover,.client-combo-item.active{background:var(--surface-2)}
+  .client-combo-item.client-combo-new{color:var(--primary);font-weight:700;border-top:1px solid var(--border)}
+  .client-combo-item.client-combo-new i{margin-right:6px}
+  .client-combo-empty{padding:10px 13px;font-size:.82rem;color:var(--text-muted)}
+  html[data-theme="dark"] .client-combo-list{background:var(--surface);border-color:var(--border-strong)}
+
   .quote-line-row{display:grid;grid-template-columns:1.3fr 1.3fr 60px 90px 80px 90px 40px;gap:8px;align-items:end;margin-bottom:10px;padding:10px;background:var(--bg);border-radius:var(--r-md);border:1px solid var(--border)}
   .qlf label{font-size:.66rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;display:block;margin-bottom:4px}
   .qlf select, .qlf input{width:100%;padding:9px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface);color:var(--text);font-size:.85rem}
@@ -912,7 +921,7 @@ function ensure(allowAutoFix = false){
     // PIN from Settings if this fallback is ever actually relied on.
     DB.users.unshift({id:"bos_rajkot",username:"bos_rajkot",pin:"9999",role:"superadmin"});
     if (!DB.profiles["bos_rajkot"]) DB.profiles["bos_rajkot"] = {displayName:"BOS RAJKOT",phone:"",email:"",bio:"",theme:"light",dateFormat:"UK"};
-    if (!DB.perUser["bos_rajkot"]) DB.perUser["bos_rajkot"] = {transactions:[],members:[],gifts:[],coaches:[],supervisors:[]};
+    if (!DB.perUser["bos_rajkot"]) DB.perUser["bos_rajkot"] = {transactions:[],members:[],gifts:[],coaches:[],supervisors:[],clients:[]};
   }
   if (!DB.permissions || Object.keys(DB.permissions).length === 0 || !DB.permissions.superadmin) {
     DB.permissions = {
@@ -927,13 +936,14 @@ function ensure(allowAutoFix = false){
        DB.permissions[u.role] = { dashboard:"view", marathon:"hidden", club:"hidden", coaches:"hidden", supervisors:"hidden", gifts:"hidden", worldteam:"view", getteam:"view", milteam:"view", presteam:"view", backup:"hidden" };
     }
     if(!DB.profiles[u.id]) DB.profiles[u.id]={displayName:u.username,phone:"",email:"",bio:"",theme:"light",dateFormat:"UK"};
-    if(!DB.perUser[u.id]) DB.perUser[u.id]={transactions:[],members:[],gifts:[],coaches:[],supervisors:[],custom:{}};
+    if(!DB.perUser[u.id]) DB.perUser[u.id]={transactions:[],members:[],gifts:[],coaches:[],supervisors:[],custom:{},clients:[]};
     else {
       if(!DB.perUser[u.id].coaches) DB.perUser[u.id].coaches=[];
       if(!DB.perUser[u.id].supervisors) DB.perUser[u.id].supervisors=[];
       if(!DB.perUser[u.id].custom) DB.perUser[u.id].custom={};
       if(!DB.perUser[u.id].products) DB.perUser[u.id].products=[];
       if(!DB.perUser[u.id].quotations) DB.perUser[u.id].quotations=[];
+      if(!DB.perUser[u.id].clients) DB.perUser[u.id].clients=[];
     }
   });
   // Existing installs (like yours) already have a `permissions` object saved from before
@@ -943,9 +953,10 @@ function ensure(allowAutoFix = false){
       if(!(sec in DB.permissions[role])) DB.permissions[role][sec] = (role==='superadmin'||role==='admin') ? 'write' : 'view';
     });
   });
-  if(!DB.shared) DB.shared={transactions:[],members:[],gifts:[],coaches:[],supervisors:[],custom:{},products:[],quotations:[]};
+  if(!DB.shared) DB.shared={transactions:[],members:[],gifts:[],coaches:[],supervisors:[],custom:{},products:[],quotations:[],clients:[]};
   if(!DB.shared.products) DB.shared.products=[];
   if(!DB.shared.quotations) DB.shared.quotations=[];
+  if(!DB.shared.clients) DB.shared.clients=[];
   else {
     if(!DB.shared.coaches) DB.shared.coaches=[];
     if(!DB.shared.supervisors) DB.shared.supervisors=[];
@@ -953,6 +964,16 @@ function ensure(allowAutoFix = false){
   }
   if(!DB.customSections) DB.customSections=[];
   if(!DB.userPermissions) DB.userPermissions={};
+  // Privacy system (Part B) defaults -- online, these arrive already-populated from
+  // buildAuthorizedView (see applyRemoteJson's {...DB, ...JSON.parse(newJson)} spread); this
+  // just guarantees the keys exist offline/local-file-test too, so the Privacy Center never
+  // has to null-check its way through a render.
+  if(!DB.privacyConsents) DB.privacyConsents={};
+  if(!DB.privacyPreferences) DB.privacyPreferences={};
+  if(!DB.policyAcceptances) DB.policyAcceptances={};
+  if(!DB.privacyRequests) DB.privacyRequests=[];
+  if(!DB.policyVersions) DB.policyVersions=[];
+  if(!DB.privacyAuditLog) DB.privacyAuditLog=[];
   DB.customSections.forEach(cs=>{ if(!cs.fields || !cs.fields.length) cs.fields = DEFAULT_CUSTOM_FIELDS(); });
   // Make sure every custom section has a records array in every data scope, even ones
   // created after some users/perUser buckets already existed.
@@ -1115,7 +1136,15 @@ setInterval(() => {
 // themselves delimited by single quotes. A name containing an apostrophe (e.g. "O'Brien")
 // used to prematurely close that attribute and break the button. HTML-entity-encoding the
 // quote here keeps it intact through HTML parsing; the browser decodes it back before JS runs.
-const sj=o=>JSON.stringify(o).replace(/'/g,"&#39;");
+// sj() must be safe as a JS-string-literal function argument embedded inside an inline event
+// handler REGARDLESS of whether that handler's outer HTML attribute uses single or double
+// quotes, AND regardless of whether the value itself contains text that merely *looks* like an
+// HTML entity (e.g. a name containing the literal characters "&#39;"). The browser decodes HTML
+// entities in an attribute value before handing it to the JS parser — so any of &, ', or " in
+// the JSON.stringify() output must be neutralized, and & must be escaped FIRST (before the ' and
+// " replacements below introduce their own &#39;/&quot; sequences), otherwise those newly-added
+// entities would themselves get re-escaped into &amp;#39; and stop decoding back correctly.
+const sj=o=>{let s=JSON.stringify(o);s=s.replace(/&/g,"&amp;");return s.replace(/'/g,"&#39;").replace(/"/g,"&quot;");};
 const $=id=>document.getElementById(id);
 const cur=()=>DB.settings.currency||"₹";
 const money=n=>cur()+Number(n||0).toLocaleString("en-IN");
@@ -1225,7 +1254,8 @@ const ACTIVITY_LABELS = {
   supervisors:{icon:'fa-user-shield',label:'Supervisor',nameKey:'name'},
   gifts:{icon:'fa-gift',label:'Gift',nameKey:'recipient'},
   products:{icon:'fa-box',label:'Product',nameKey:'name'},
-  quotations:{icon:'fa-file-invoice-dollar',label:'Quotation',nameKey:'customerName'}
+  quotations:{icon:'fa-file-invoice-dollar',label:'Quotation',nameKey:'customerName'},
+  clients:{icon:'fa-address-book',label:'Client',nameKey:'name'}
 };
 function logActivity(action, coll, name, scopeId){
   const meta = ACTIVITY_LABELS[coll]; if(!meta) return;
@@ -1255,6 +1285,41 @@ function levenshtein(a, b){
     prev = cur;
   }
   return prev[n];
+}
+/* ===== Client helpers (shared by Marathon Payment client selector + client profile) ===== */
+function findClientById(id){ if(!id) return null; const d=data(); return (d.clients||[]).find(c=>c.id===id) || null; }
+function normalizeClientName(n){ return (n||"").toLowerCase().replace(/[^a-z\s]/g,"").trim(); }
+function normalizeClientPhone(p){ return (p||"").replace(/[^0-9]/g,""); }
+function normalizeClientEmail(e){ return (e||"").trim().toLowerCase(); }
+// Search matches for the client selector combobox — by name, phone digits, or email.
+function getClientMatches(query){
+  const d=data();
+  const list=[...(d.clients||[])];
+  const q=(query||"").trim().toLowerCase();
+  if(!q) return list.sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+  const qDigits=q.replace(/[^0-9]/g,"");
+  return list.filter(c=>{
+    const n=(c.name||"").toLowerCase(), p=normalizeClientPhone(c.phone), e=(c.email||"").toLowerCase();
+    return n.includes(q) || (qDigits.length>=3 && p.includes(qDigits)) || e.includes(q);
+  }).sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+}
+// Likely-duplicate detection for clients — mirrors the normalization/levenshtein pattern the
+// dashboard's member/coach/supervisor duplicate scanner already uses (same-phone, same-email,
+// exact or near-exact name), reusing the existing global levenshtein() rather than a second
+// implementation. Never merges anything automatically — callers just surface a warning and let
+// the user decide.
+function findClientDuplicates(name, phone, email, excludeId){
+  const d=data();
+  const nName=normalizeClientName(name), nPhone=normalizeClientPhone(phone), nEmail=normalizeClientEmail(email);
+  return (d.clients||[]).filter(c=>{
+    if(c.id===excludeId) return false;
+    const cName=normalizeClientName(c.name), cPhone=normalizeClientPhone(c.phone), cEmail=normalizeClientEmail(c.email);
+    const samePhone = nPhone && cPhone && nPhone===cPhone && nPhone.length>=7;
+    const sameEmail = nEmail && cEmail && nEmail===cEmail;
+    const sameName = nName && cName && nName===cName;
+    const closeTypo = nName && cName && !sameName && Math.abs(nName.length-cName.length)<=2 && nName.length>5 && levenshtein(nName,cName)<=2;
+    return samePhone || sameEmail || sameName || closeTypo;
+  });
 }
 function timeAgo(ts){
   const diff = Math.floor((Date.now()-ts)/1000);
@@ -1338,7 +1403,7 @@ function canWrite(section) { return getPerm(section) === 'write'; }
 function data(){
   if(DB.settings.dataSharing) return DB.shared;
   const uid=viewingAs||currentUser?.id;
-  if(!DB.perUser[uid]) DB.perUser[uid]={transactions:[],members:[],gifts:[],coaches:[],supervisors:[],products:[],quotations:[]};
+  if(!DB.perUser[uid]) DB.perUser[uid]={transactions:[],members:[],gifts:[],coaches:[],supervisors:[],products:[],quotations:[],clients:[]};
   return DB.perUser[uid];
 }
 
@@ -1420,7 +1485,7 @@ window.rankModal = (type, id) => {
         </div>
         <div class="modal-btns">
             <button class="btn btn-gray" onclick="closeModal()">Cancel</button>
-            <button class="btn btn-purple" onclick="executeRankChange('${type}', '${id}')"><i class="fas fa-exchange-alt"></i> Confirm Change</button>
+            <button class="btn btn-purple" onclick="executeRankChange(${sj(type)}, ${sj(id)})"><i class="fas fa-exchange-alt"></i> Confirm Change</button>
         </div>
     `);
 };
@@ -1458,8 +1523,8 @@ window.showSupervisorLoginModal = (oldType, id) => {
         <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:16px;line-height:1.4">A username and PIN have been suggested automatically — edit them yourself, or tap Regenerate for a new suggestion.</p>
         <div class="form-group"><label>Login Username</label><input id="promo_user" value="${esc(suggestUsername(person.name))}"></div>
         <div class="form-group"><label>PIN (min 4 digits)</label><input id="promo_pin" maxlength="16" value="${esc(suggestPin())}"></div>
-        <button class="btn btn-gray" style="width:100%;margin-bottom:14px" onclick="regenerateSuggestion('${esc(person.name)}')"><i class="fas fa-dice"></i> Regenerate Suggestion</button>
-        <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-purple" onclick="confirmSupervisorPromotion('${oldType}','${id}')"><i class="fas fa-check"></i> Create & Promote</button></div>
+        <button class="btn btn-gray" style="width:100%;margin-bottom:14px" onclick="regenerateSuggestion(${sj(person.name)})"><i class="fas fa-dice"></i> Regenerate Suggestion</button>
+        <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-purple" onclick="confirmSupervisorPromotion(${sj(oldType)},${sj(id)})"><i class="fas fa-check"></i> Create & Promote</button></div>
     `);
 };
 window.regenerateSuggestion = (name) => { $("promo_user").value = suggestUsername(name); $("promo_pin").value = suggestPin(); };
@@ -1834,7 +1899,7 @@ function buildNav(){
     let sectionHtml = "";
     if(n.section !== lastSection){ sectionHtml = `<div class="nav-section-lbl">${esc(t(sectionKeyMap[n.section]||n.section))}</div>`; lastSection = n.section; }
     const label = I18N.en[n.id] ? t(n.id) : n.label;
-    return sectionHtml + `<div class="nav-item${n.id===activePage?' active':''}" data-tab="${esc(n.id)}" onclick="go('${esc(n.id)}')"><i class="fas ${esc(n.icon)}"></i>${esc(label)}</div>`;
+    return sectionHtml + `<div class="nav-item${n.id===activePage?' active':''}" data-tab="${esc(n.id)}" onclick="go(${sj(n.id)})"><i class="fas ${esc(n.icon)}"></i>${esc(label)}</div>`;
   }).join("");
 }
 function cleanMenuToggle() { if(window.innerWidth<=900) { const sb = document.querySelector('.sidebar'); if(sb) sb.classList.remove('open'); const bd=$("sidebarBackdrop"); if(bd) bd.style.display='none'; } }
@@ -1884,7 +1949,7 @@ function showSkeleton(){
 function switcher(){
   if(!isAdmin()||DB.settings.dataSharing) return "";
   return `<div class="switcher"><span class="lbl">Viewing Context:</span>`+
-    DB.users.map(u=>`<button class="chip${(viewingAs||currentUser.id)===u.id?' active':''}" onclick="setView('${esc(u.id)}')">${esc(DB.profiles[u.id]?.displayName||u.username)}</button>`).join("")+`</div>`;
+    DB.users.map(u=>`<button class="chip${(viewingAs||currentUser.id)===u.id?' active':''}" onclick="setView(${sj(u.id)})">${esc(DB.profiles[u.id]?.displayName||u.username)}</button>`).join("")+`</div>`;
 }
 window.setView=id=>{ viewingAs=id; render(); };
 
@@ -1937,8 +2002,8 @@ function render(){
     return;
   }
 
-  const map={dashboard:renderDash,marathon:renderMarathon,club:renderClub,coaches:renderCoaches,supervisors:renderSupervisors,gifts:renderGifts,products:renderProducts,quotations:renderQuotations,worldteam:()=>renderRankSection('worldteam'),getteam:()=>renderRankSection('getteam'),milteam:()=>renderRankSection('milteam'),presteam:()=>renderRankSection('presteam'),backup:renderBackup,admin:renderAdmin,permissions:renderPermissions,individualaccess:renderIndividualAccess,sectionmanager:renderSectionManager,profile:renderProfile,settings:renderSettings};
-  const titles={dashboard:"Dashboard Overview",marathon:"Marathon Payments",club:"Club Membership",coaches:"Club Coaches",supervisors:"Supervisors",gifts:"Gifts & Rewards",products:"Products",quotations:"Quotations",worldteam:"World Team",getteam:"GET Team",milteam:"Millionaire Team",presteam:"President's Team",backup:"Data Management",admin:"User Management",permissions:"Access Control Manager",individualaccess:"Individual Access",sectionmanager:"Custom Sections",profile:"My Profile",settings:"Account Settings"};
+  const map={dashboard:renderDash,marathon:renderMarathon,club:renderClub,coaches:renderCoaches,supervisors:renderSupervisors,gifts:renderGifts,products:renderProducts,quotations:renderQuotations,worldteam:()=>renderRankSection('worldteam'),getteam:()=>renderRankSection('getteam'),milteam:()=>renderRankSection('milteam'),presteam:()=>renderRankSection('presteam'),backup:renderBackup,admin:renderAdmin,permissions:renderPermissions,individualaccess:renderIndividualAccess,sectionmanager:renderSectionManager,profile:renderProfile,settings:renderSettings,privacy:renderPrivacyCenter};
+  const titles={dashboard:"Dashboard Overview",marathon:"Marathon Payments",club:"Club Membership",coaches:"Club Coaches",supervisors:"Supervisors",gifts:"Gifts & Rewards",products:"Products",quotations:"Quotations",worldteam:"World Team",getteam:"GET Team",milteam:"Millionaire Team",presteam:"President's Team",backup:"Data Management",admin:"User Management",permissions:"Access Control Manager",individualaccess:"Individual Access",sectionmanager:"Custom Sections",profile:"My Profile",settings:"Account Settings",privacy:"Privacy Center"};
   const translatedTitle = I18N.en[activePage] ? t(activePage) : (titles[activePage]||"Dashboard");
   topbar(translatedTitle);
   (map[activePage]||renderDash)();
@@ -1999,8 +2064,8 @@ function renderGlobalSearchResults(){
       </div>
       <div style="display:flex;gap:6px">
         ${r.phone ? `<a href="tel:${esc(r.phone)}" class="btn btn-sm btn-blue" title="Call"><i class="fas fa-phone"></i></a>` : ''}
-        ${r.phone ? `<button class="btn btn-sm btn-whatsapp" onclick="openWhatsApp('${esc(r.phone)}', 'Hi')" title="Chat on WhatsApp"><i class="fab fa-whatsapp"></i></button>` : ''}
-        <button class="btn btn-sm btn-gray" onclick="go('${r._page}')" title="Open"><i class="fas fa-arrow-right"></i></button>
+        ${r.phone ? `<button class="btn btn-sm btn-whatsapp" onclick="openWhatsApp(${sj(r.phone)}, 'Hi')" title="Chat on WhatsApp"><i class="fab fa-whatsapp"></i></button>` : ''}
+        <button class="btn btn-sm btn-gray" onclick="go(${sj(r._page)})" title="Open"><i class="fas fa-arrow-right"></i></button>
       </div>
     </div>`).join("") + `</div>`
     : `<div class="empty" style="padding:20px;margin-top:14px;background:var(--surface);border:1px solid var(--border);border-radius:8px"><i class="fas fa-user-slash"></i>No matches for "${esc(globalSearchQuery)}"</div>`;
@@ -2019,10 +2084,10 @@ function renderDash(){
 
     firstKitDue.forEach(m => {
       const days = Math.floor((now - new Date(m.joinDate || 0).getTime()) / 86400000);
-      alertItems.push(`<div class="alert-item" id="alert-${esc(m.id)}_k1"><span><i class="fas fa-exclamation-circle" style="margin-right:6px;color:#f59e0b"></i> <b>${esc(m.name)}</b>'s First Kit is pending (${days} days ago)</span> <div style="display:flex;gap:8px;align-items:center"><button class="btn btn-sm btn-amber" onclick="go('club')">Resolve</button><button class="btn btn-sm btn-whatsapp" onclick="openWhatsApp('${esc(m.phone||'')}', 'Hi')" title="WhatsApp Reminder"><i class="fab fa-whatsapp"></i></button><button class="alert-x-btn" onclick="dismissSingleAlert('${esc(m.id)}_k1')" title="Dismiss"><i class="fas fa-times"></i></button></div></div>`);
+      alertItems.push(`<div class="alert-item" id="alert-${esc(m.id)}_k1"><span><i class="fas fa-exclamation-circle" style="margin-right:6px;color:#f59e0b"></i> <b>${esc(m.name)}</b>'s First Kit is pending (${days} days ago)</span> <div style="display:flex;gap:8px;align-items:center"><button class="btn btn-sm btn-amber" onclick="go('club')">Resolve</button><button class="btn btn-sm btn-whatsapp" onclick="openWhatsApp(${sj(m.phone||'')}, 'Hi')" title="WhatsApp Reminder"><i class="fab fa-whatsapp"></i></button><button class="alert-x-btn" onclick="dismissSingleAlert(${sj(m.id+'_k1')})" title="Dismiss"><i class="fas fa-times"></i></button></div></div>`);
     });
     secondKitDue.forEach(m => {
-      alertItems.push(`<div class="alert-item" id="alert-${esc(m.id)}_k2"><span><i class="fas fa-check-circle" style="margin-right:6px;color:#f59e0b"></i> <b>${esc(m.name)}</b> finished 1st Kit. 2nd Kit due!</span> <div style="display:flex;gap:8px;align-items:center"><button class="btn btn-sm btn-amber" onclick="go('club')">Resolve</button><button class="btn btn-sm btn-whatsapp" onclick="openWhatsApp('${esc(m.phone||'')}', 'Hi')" title="WhatsApp Reminder"><i class="fab fa-whatsapp"></i></button><button class="alert-x-btn" onclick="dismissSingleAlert('${esc(m.id)}_k2')" title="Dismiss"><i class="fas fa-times"></i></button></div></div>`);
+      alertItems.push(`<div class="alert-item" id="alert-${esc(m.id)}_k2"><span><i class="fas fa-check-circle" style="margin-right:6px;color:#f59e0b"></i> <b>${esc(m.name)}</b> finished 1st Kit. 2nd Kit due!</span> <div style="display:flex;gap:8px;align-items:center"><button class="btn btn-sm btn-amber" onclick="go('club')">Resolve</button><button class="btn btn-sm btn-whatsapp" onclick="openWhatsApp(${sj(m.phone||'')}, 'Hi')" title="WhatsApp Reminder"><i class="fab fa-whatsapp"></i></button><button class="alert-x-btn" onclick="dismissSingleAlert(${sj(m.id+'_k2')})" title="Dismiss"><i class="fas fa-times"></i></button></div></div>`);
     });
   }
 
@@ -2061,7 +2126,7 @@ function renderDash(){
   if(canView('coaches')) scanForDupes(getScopedCoaches(d), 'coaches');
   if(canView('supervisors')) scanForDupes(getScopedSupervisors(d), 'supervisors');
   dupePairs.slice(0,5).forEach(({type,a,b,pairKey,reason}) => {
-    alertItems.push(`<div class="alert-item" id="alert-dupe_${esc(pairKey)}"><span><i class="fas fa-clone" style="margin-right:6px;color:#f59e0b"></i> <b>${esc(a.name)}</b> and <b>${esc(b.name)}</b> ${reason}</span> <div style="display:flex;gap:8px;align-items:center"><button class="btn btn-sm btn-amber" onclick="mergeModal('${type}','${esc(a.id)}','${esc(b.id)}')">Review</button><button class="alert-x-btn" onclick="dismissSingleAlert('dupe_${esc(pairKey)}')" title="Dismiss"><i class="fas fa-times"></i></button></div></div>`);
+    alertItems.push(`<div class="alert-item" id="alert-dupe_${esc(pairKey)}"><span><i class="fas fa-clone" style="margin-right:6px;color:#f59e0b"></i> <b>${esc(a.name)}</b> and <b>${esc(b.name)}</b> ${reason}</span> <div style="display:flex;gap:8px;align-items:center"><button class="btn btn-sm btn-amber" onclick="mergeModal(${sj(type)},${sj(a.id)},${sj(b.id)})">Review</button><button class="alert-x-btn" onclick="dismissSingleAlert(${sj('dupe_'+pairKey)})" title="Dismiss"><i class="fas fa-times"></i></button></div></div>`);
   });
 
   // Backup reminder — nudges the person who'd actually run the export, not everyone.
@@ -2205,32 +2270,296 @@ function renderMarathonResults(){
         `<table><thead><tr><th>Date</th><th>Customer</th><th>Product/Note</th><th>Type</th><th>Amount</th><th>Status</th>${canWrite('marathon')?'<th>Actions</th>':''}</tr></thead><tbody>`+
         rows.map(tx=>`<tr>
           <td data-label="Date">${fmtDate(tx.date)}</td>
-          <td data-label="Customer"><div style="display:flex;gap:10px;align-items:flex-start">${avatarChip(tx.customer)}<div><div style="font-weight:700;color:var(--text)">${esc(dispName(tx.customer))}</div>${tx.lastEditedBy ? `<div style="font-size:.7rem;color:var(--text-muted);font-weight:500;margin-top:4px;letter-spacing:0"><i class="fas fa-user-edit" style="font-size:.65rem;margin-right:3px"></i> ${esc(tx.lastEditedBy)}</div>` : ''}</div></div></td>
+          <td data-label="Customer"><div style="display:flex;gap:10px;align-items:flex-start">${avatarChip(tx.customer)}<div><div style="font-weight:700;color:var(--text)">${tx.clientId?`<a href="#" onclick='event.preventDefault();clientProfileModal(${sj(tx.clientId)})' style="color:inherit;text-decoration:underline;text-decoration-style:dotted;cursor:pointer">${esc(dispName(tx.customer))}</a>`:esc(dispName(tx.customer))}</div>${tx.lastEditedBy ? `<div style="font-size:.7rem;color:var(--text-muted);font-weight:500;margin-top:4px;letter-spacing:0"><i class="fas fa-user-edit" style="font-size:.65rem;margin-right:3px"></i> ${esc(tx.lastEditedBy)}</div>` : ''}</div></div></td>
           <td data-label="Details">${esc(tx.product||"")}${tx.notes?`<div style="font-size:.75rem;color:var(--text-muted);margin-top:4px">${esc(tx.notes)}</div>`:""}</td>
           <td data-label="Type"><span class="badge ${tx.type==='sent'?'bg-red':'bg-green'}">${tx.type==='sent'?'Sent (Debit)':'Received (Credit)'}</span></td>
           <td data-label="Amount" style="font-weight:800;font-size:1.05rem;color:${tx.type==='sent'?'#dc2626':'#059669'}">${tx.type==='sent'?'-':'+'}${money(tx.amount)}</td>
           <td data-label="${t('status')}"><span class="badge ${tx.status==='completed'?'bg-gray':'bg-amber'}">${tx.status}</span></td>
-          ${canWrite('marathon')?`<td data-label="${t('actions')}"><button class="btn btn-sm btn-gray" onclick='txModal(${sj(tx)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('transactions','${esc(tx.id)}')"><i class="fas fa-trash"></i></button></td>`:''}
+          ${canWrite('marathon')?`<td data-label="${t('actions')}"><button class="btn btn-sm btn-gray" onclick='txModal(${sj(tx)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('transactions',${sj(tx.id)})"><i class="fas fa-trash"></i></button></td>`:''}
         </tr>`).join("")+`</tbody></table>` : `<div class="empty"><i class="fas fa-running"></i>No marathon payments logged</div>`;
 }
-window.txModal=(t={})=>showModal(`
+/* ---- Client selector (Marathon Payment "Client" field) ----
+   Backed by the real d.clients collection (not harvested from transaction text anymore).
+   Searches by name/phone/email, offers "+ Create New Client" inline, and tracks which real
+   client record (if any) is currently selected via txSelectedClientId. `data()` is already
+   scoped to what the current viewer is allowed to see, so results never leak clients outside
+   that scope. */
+let clientComboEntries=[], clientComboActiveIndex=-1, clientComboDocListenerAttached=false, clientComboSkipNextFocus=false;
+let txSelectedClientId=null, txCurrentId="", txCurrentDate="", txOriginalCustomer="";
+let clientModalOnSaved=null, clientModalOnCancel=null;
+function initClientCombo(existingClientId){
+  txSelectedClientId=existingClientId||null;
+  const input=$("f_cust");
+  if(!input) return;
+  input.addEventListener("input", ()=>{
+    // Any manual typing invalidates a previously-selected client until they pick one again —
+    // otherwise an edited name could silently stay linked to the old client id.
+    txSelectedClientId=null;
+    renderClientComboList();
+  });
+  input.addEventListener("focus", ()=>{
+    // selectClientCombo() re-focuses the input after picking an item so typing can continue
+    // immediately; without this guard that programmatic focus would instantly reopen the
+    // list it just closed.
+    if(clientComboSkipNextFocus){ clientComboSkipNextFocus=false; return; }
+    renderClientComboList();
+  });
+  input.addEventListener("keydown", clientComboKeydown);
+  if(!clientComboDocListenerAttached){
+    document.addEventListener("click", e=>{
+      const combo=$("clientCombo");
+      if(combo && !combo.contains(e.target)) closeClientComboList();
+    });
+    clientComboDocListenerAttached=true;
+  }
+}
+function renderClientComboList(){
+  const input=$("f_cust"), list=$("clientComboList");
+  if(!input||!list) return;
+  const q=input.value.trim();
+  const matches=getClientMatches(q);
+  clientComboEntries=matches.map(c=>({type:'client', client:c}));
+  clientComboEntries.push({type:'new', name:q});
+  clientComboActiveIndex=clientComboEntries.length?0:-1;
+  const rows=matches.map((c,i)=>`<div class="client-combo-item${i===0?' active':''}" onmousedown='event.preventDefault();selectClientCombo(${sj(c.id)})'>
+      <div style="font-weight:700">${esc(c.name)}</div>${(c.phone||c.email)?`<div style="font-size:.75rem;color:var(--text-muted)">${esc(c.phone||c.email)}</div>`:''}
+    </div>`).join("");
+  const newIdx=matches.length;
+  const newRow=`<div class="client-combo-item client-combo-new${newIdx===0?' active':''}" onmousedown='event.preventDefault();openCreateClientFromCombo(${sj(q)})'><i class="fas fa-plus"></i> ${q?`Create New Client: "${esc(q)}"`:'Create New Client'}</div>`;
+  list.innerHTML = (matches.length ? rows : (q ? `<div class="client-combo-empty">No matching clients</div>` : ``)) + newRow;
+  list.style.display="block";
+}
+function highlightClientComboActive(){
+  const list=$("clientComboList"); if(!list) return;
+  const items=list.querySelectorAll(".client-combo-item");
+  items.forEach((el,i)=>{
+    el.classList.toggle("active", i===clientComboActiveIndex);
+    if(i===clientComboActiveIndex && typeof el.scrollIntoView==="function") el.scrollIntoView({block:"nearest"});
+  });
+}
+function closeClientComboList(){
+  const list=$("clientComboList");
+  if(list) list.style.display="none";
+}
+window.selectClientCombo=(clientId)=>{
+  const input=$("f_cust"); if(!input) return;
+  const c=findClientById(clientId); if(!c) return;
+  input.value=c.name;
+  txSelectedClientId=clientId;
+  closeClientComboList();
+  clientComboSkipNextFocus=true;
+  input.focus();
+};
+function clientComboKeydown(e){
+  const list=$("clientComboList");
+  const isOpen=list && list.style.display!=="none";
+  if(e.key==="ArrowDown"){
+    e.preventDefault();
+    if(!isOpen){ renderClientComboList(); return; }
+    if(clientComboEntries.length){ clientComboActiveIndex=(clientComboActiveIndex+1)%clientComboEntries.length; highlightClientComboActive(); }
+  } else if(e.key==="ArrowUp"){
+    e.preventDefault();
+    if(!isOpen){ renderClientComboList(); return; }
+    if(clientComboEntries.length){ clientComboActiveIndex=(clientComboActiveIndex-1+clientComboEntries.length)%clientComboEntries.length; highlightClientComboActive(); }
+  } else if(e.key==="Enter"){
+    if(isOpen && clientComboActiveIndex>=0 && clientComboEntries[clientComboActiveIndex]){
+      e.preventDefault();
+      const entry=clientComboEntries[clientComboActiveIndex];
+      if(entry.type==='new') openCreateClientFromCombo(entry.name);
+      else selectClientCombo(entry.client.id);
+    }
+  } else if(e.key==="Escape"){
+    if(isOpen){ e.preventDefault(); e.stopPropagation(); closeClientComboList(); }
+  }
+}
+// Opens the "+ Create New Client" modal from within the payment form, preserving the
+// payment form's other in-progress field values so they can be restored afterward — the app
+// only has one modal slot, so creating a client necessarily replaces the payment modal
+// temporarily rather than stacking on top of it.
+window.openCreateClientFromCombo=(prefillName)=>{
+  const savedState={
+    id:txCurrentId, date:txCurrentDate,
+    product:$("f_prod")?.value||"", type:$("f_type")?.value||"received",
+    amount:$("f_amt")?.value||"", status:$("f_stat")?.value||"completed",
+    notes:$("f_notes")?.value||""
+  };
+  const reopenPaymentForm=()=>txModal({
+    id:savedState.id, date:savedState.date, product:savedState.product, type:savedState.type,
+    amount:savedState.amount, status:savedState.status, notes:savedState.notes
+  });
+  clientModal({name:prefillName},
+    (client)=>txModal({
+      id:savedState.id, date:savedState.date, product:savedState.product, type:savedState.type,
+      amount:savedState.amount, status:savedState.status, notes:savedState.notes,
+      customer:client.name, clientId:client.id
+    }),
+    reopenPaymentForm
+  );
+};
+window.txModal=(t={})=>{
+  txCurrentId=t.id||""; txCurrentDate=t.date||""; txOriginalCustomer=t.customer||"";
+  showModal(`
   <div class="modal-head"><h3>${t.id?"Edit":"Log"} Marathon Payment</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
-  <div class="form-group"><label>Customer Name</label><input id="f_cust" value="${esc(t.customer||"")}"></div>
+  <div class="form-group"><label>Client</label>
+    <div class="client-combo" id="clientCombo">
+      <input id="f_cust" autocomplete="off" placeholder="Search or select a client" value="${esc(t.customer||"")}">
+      <div class="client-combo-list" id="clientComboList" style="display:none"></div>
+    </div>
+  </div>
   <div class="form-group"><label>Product / Description</label><input id="f_prod" value="${esc(t.product||"")}"></div>
   <div class="form-group"><label>Payment Type</label><select id="f_type"><option value="received"${t.type!=='sent'?' selected':''}>Received (Credit)</option><option value="sent"${t.type==='sent'?' selected':''}>Sent (Debit)</option></select></div>
   <div class="form-group"><label>Amount</label><input id="f_amt" type="number" inputmode="numeric" value="${t.amount||""}"></div>
   <div class="form-group"><label>Status</label><select id="f_stat"><option value="completed"${t.status==='completed'?' selected':''}>Completed</option><option value="pending"${t.status==='pending'?' selected':''}>Pending</option></select></div>
   <div class="form-group"><label>Notes</label><textarea id="f_notes">${esc(t.notes||"")}</textarea></div>
-  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveTx("${esc(t.id||"")}","${t.date||""}")'>Save Record</button></div>`);
+  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveTx(${sj(t.id||"")},${sj(t.date||"")})'>Save Record</button></div>`);
+  initClientCombo(t.clientId||null);
+};
 window.saveTx=(id,date)=>{
   const customer=$("f_cust").value.trim(); if(!customer) return toast("Customer name required");
   const status=$("f_stat").value;
-  commitItem('transactions', {
-    id: id||nid(), customer, product:$("f_prod").value.trim(), type:$("f_type").value, 
-    amount:+$("f_amt").value||0, status, notes:$("f_notes").value.trim(), 
-    date: date||new Date().toISOString(), completedDate: status==='completed'?new Date().toISOString():null,
+  const finalize=(clientId)=>{
+    commitItem('transactions', {
+      id: id||nid(), customer, clientId: clientId||null, product:$("f_prod").value.trim(), type:$("f_type").value,
+      amount:+$("f_amt").value||0, status, notes:$("f_notes").value.trim(),
+      date: date||new Date().toISOString(), completedDate: status==='completed'?new Date().toISOString():null,
+      ownerId: viewingAs||currentUser.id, lastEditedBy: getEditor()
+    }, id ? "Payment updated" : "Payment added");
+  };
+  if(txSelectedClientId){
+    const c=findClientById(txSelectedClientId);
+    if(c){ finalize(c.id); return; }
+  }
+  // No client explicitly selected. Only run the duplicate check for a brand-new payment or
+  // when the typed name actually changed — an untouched edit of a legacy record must keep
+  // working exactly as before, with no new interruption.
+  const nameChanged = !id || customer!==txOriginalCustomer;
+  if(nameChanged){
+    const dupes=findClientDuplicates(customer, "", "", null);
+    if(dupes.length){
+      showConfirmModal({
+        title:"Possible Existing Client",
+        message:`"${customer}" looks like it might be the same person as an existing client: ${dupes.map(d=>d.name).join(", ")}. Save this payment without linking to that client anyway?`,
+        confirmLabel:"Save Without Linking",
+        onConfirm: ()=>finalize(null)
+      });
+      return;
+    }
+  }
+  finalize(null);
+};
+/* ---- Create Client modal ---- */
+window.clientModal=(prefill={}, onSaved=null, onCancel=null)=>{
+  clientModalOnSaved=onSaved; clientModalOnCancel=onCancel;
+  showModal(`
+  <div class="modal-head"><h3>Create New Client</h3><button class="modal-close" onclick="cancelClientModal()"><i class="fas fa-times"></i></button></div>
+  <div class="form-group"><label>Client Name</label><input id="cl_name" maxlength="120" value="${esc(prefill.name||"")}" oninput="checkClientDuplicateWarn()"></div>
+  <div class="form-group"><label>Phone</label><input id="cl_phone" maxlength="30" oninput="checkClientDuplicateWarn()"></div>
+  <div class="form-group"><label>Email</label><input id="cl_email" maxlength="120" oninput="checkClientDuplicateWarn()"></div>
+  <div class="phone-warn hidden" id="cl_dupe_warn"></div>
+  <div class="form-group"><label>Address</label><textarea id="cl_address" maxlength="300" placeholder="Street, city, pincode..."></textarea></div>
+  <div class="form-group"><label>Notes</label><textarea id="cl_notes" maxlength="1000"></textarea></div>
+  <div class="modal-btns"><button class="btn btn-gray" onclick="cancelClientModal()">Cancel</button><button class="btn btn-primary" onclick="saveNewClient()"><i class="fas fa-check"></i> Save Client</button></div>`);
+  if((prefill.name||"").trim()) checkClientDuplicateWarn();
+};
+window.cancelClientModal=()=>{
+  const cb=clientModalOnCancel;
+  clientModalOnCancel=null; clientModalOnSaved=null;
+  closeModal();
+  // closeModal()'s own fade-out finishes ~150ms later and clears #modalRoot — reopening the
+  // payment form before that finishes would get wiped out by it, so wait it out first.
+  if(cb) setTimeout(cb, 200);
+};
+window.checkClientDuplicateWarn=()=>{
+  const warnEl=$("cl_dupe_warn"); if(!warnEl) return;
+  const name=$("cl_name")?.value||"", phone=$("cl_phone")?.value||"", email=$("cl_email")?.value||"";
+  if(!name.trim() && !phone.trim() && !email.trim()){ warnEl.classList.add("hidden"); warnEl.innerHTML=""; return; }
+  const dupes=findClientDuplicates(name, phone, email, null);
+  if(dupes.length){
+    warnEl.innerHTML=`<i class="fas fa-triangle-exclamation"></i> Possible existing client: `+
+      dupes.slice(0,3).map(c=>`<a href="#" onclick='event.preventDefault();useExistingClientFromWarn(${sj(c.id)})' style="text-decoration:underline;color:inherit">${esc(c.name)}${c.phone?` (${esc(c.phone)})`:''}</a>`).join(", ");
+    warnEl.classList.remove("hidden");
+  } else {
+    warnEl.classList.add("hidden"); warnEl.innerHTML="";
+  }
+};
+window.useExistingClientFromWarn=(clientId)=>{
+  const c=findClientById(clientId); if(!c) return;
+  const cb=clientModalOnSaved;
+  clientModalOnSaved=null; clientModalOnCancel=null;
+  closeModal();
+  if(cb) setTimeout(()=>cb(c), 200);
+};
+// Conservative length caps for the new Client fields — a UX/data-integrity safeguard only.
+// These do NOT provide any security boundary: the real authorization boundary is which
+// perUser/shared bucket a record lands in (enforced server-side by the Worker), not field
+// shape. A client with an over-limit field is simply rejected client-side before it's ever
+// sent; nothing here is relied on to stop a malicious or forged request.
+const CLIENT_FIELD_LIMITS = { name: 120, phone: 30, email: 120, address: 300, notes: 1000 };
+function validateClientFields(f){
+  if(f.name.length > CLIENT_FIELD_LIMITS.name) return `Client name must be ${CLIENT_FIELD_LIMITS.name} characters or fewer`;
+  if(f.phone.length > CLIENT_FIELD_LIMITS.phone) return `Phone must be ${CLIENT_FIELD_LIMITS.phone} characters or fewer`;
+  if(f.email.length > CLIENT_FIELD_LIMITS.email) return `Email must be ${CLIENT_FIELD_LIMITS.email} characters or fewer`;
+  if(f.address.length > CLIENT_FIELD_LIMITS.address) return `Address must be ${CLIENT_FIELD_LIMITS.address} characters or fewer`;
+  if(f.notes.length > CLIENT_FIELD_LIMITS.notes) return `Notes must be ${CLIENT_FIELD_LIMITS.notes} characters or fewer`;
+  return null;
+}
+window.saveNewClient=()=>{
+  const name=$("cl_name").value.trim(); if(!name) return toast("Client name required");
+  const fields = {
+    name, phone:$("cl_phone").value.trim(), email:$("cl_email").value.trim(),
+    address:$("cl_address").value.trim(), notes:$("cl_notes").value.trim()
+  };
+  const validationError = validateClientFields(fields);
+  if(validationError) return toast(validationError);
+  const item={
+    id:nid(), ...fields,
+    createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(),
     ownerId: viewingAs||currentUser.id, lastEditedBy: getEditor()
-  }, id ? "Payment updated" : "Payment added");
+  };
+  const cb=clientModalOnSaved;
+  clientModalOnSaved=null; clientModalOnCancel=null;
+  commitItem('clients', item, "Client added");
+  // commitItem() closes this modal asynchronously (~150ms fade) — wait it out before opening
+  // the next one (reopened payment form), same reasoning as cancelClientModal() above.
+  if(cb) setTimeout(()=>cb(item), 200);
+};
+/* ---- Client profile / payment history ---- */
+window.clientProfileModal=(clientId)=>{
+  const d=data();
+  const c=(d.clients||[]).find(x=>x.id===clientId);
+  if(!c){ toast("Client not found"); return; }
+  const payments=(d.transactions||[]).filter(tx=>tx.clientId===clientId).sort((a,b)=>new Date(b.date||0).getTime()-new Date(a.date||0).getTime());
+  let totalReceived=0, totalSent=0, pendingReceived=0, pendingSent=0;
+  payments.forEach(tx=>{
+    const amt=+tx.amount||0;
+    if(tx.type==='sent'){ totalSent+=amt; if(tx.status!=='completed') pendingSent+=amt; }
+    else { totalReceived+=amt; if(tx.status!=='completed') pendingReceived+=amt; }
+  });
+  const rows=payments.length ? payments.map(tx=>`<tr>
+      <td data-label="Date">${fmtDate(tx.date)}</td>
+      <td data-label="Details">${esc(tx.product||"")}${tx.notes?`<div style="font-size:.75rem;color:var(--text-muted);margin-top:4px">${esc(tx.notes)}</div>`:""}</td>
+      <td data-label="Type"><span class="badge ${tx.type==='sent'?'bg-red':'bg-green'}">${tx.type==='sent'?'Sent':'Received'}</span></td>
+      <td data-label="Amount" style="font-weight:800;color:${tx.type==='sent'?'#dc2626':'#059669'}">${tx.type==='sent'?'-':'+'}${money(tx.amount)}</td>
+      <td data-label="Status"><span class="badge ${tx.status==='completed'?'bg-gray':'bg-amber'}">${tx.status}</span></td>
+    </tr>`).join("") : `<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">No payments yet</td></tr>`;
+  showModal(`
+    <div class="modal-head"><h3><i class="fas fa-address-book"></i> ${esc(c.name)}</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
+    <div style="font-size:.85rem;color:var(--text-muted);margin-bottom:14px;line-height:1.7">
+      ${c.phone?`<div><i class="fas fa-phone" style="width:16px"></i> ${esc(c.phone)}</div>`:""}
+      ${c.email?`<div><i class="fas fa-envelope" style="width:16px"></i> ${esc(c.email)}</div>`:""}
+      ${c.address?`<div><i class="fas fa-location-dot" style="width:16px"></i> ${esc(c.address)}</div>`:""}
+      ${c.notes?`<div style="margin-top:6px"><i class="fas fa-note-sticky" style="width:16px"></i> ${esc(c.notes)}</div>`:""}
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px">
+      <div class="stat" style="flex:1;min-width:130px"><div class="stat-info"><div class="stat-val" style="color:#059669">${money(totalReceived)}</div><div class="stat-lbl">Total Received</div></div></div>
+      <div class="stat" style="flex:1;min-width:130px"><div class="stat-info"><div class="stat-val" style="color:#dc2626">${money(totalSent)}</div><div class="stat-lbl">Total Sent</div></div></div>
+      ${pendingReceived?`<div class="stat" style="flex:1;min-width:130px"><div class="stat-info"><div class="stat-val" style="color:var(--warning)">${money(pendingReceived)}</div><div class="stat-lbl">Pending Received</div></div></div>`:""}
+      ${pendingSent?`<div class="stat" style="flex:1;min-width:130px"><div class="stat-info"><div class="stat-val" style="color:var(--warning)">${money(pendingSent)}</div><div class="stat-lbl">Pending Sent</div></div></div>`:""}
+    </div>
+    <div class="card-title" style="margin-bottom:8px">Payment History</div>
+    <div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Product/Note</th><th>Type</th><th>Amount</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Close</button></div>
+  `);
 };
 
 /* ===== Club Membership ===== */
@@ -2351,7 +2680,7 @@ function renderClubResults(){
              <div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end">
                <span style="white-space:nowrap">${esc(m.phone||"-")}</span> 
                ${m.phone && m.phone.trim()!=="-" ?`<a href="tel:${esc(m.phone)}" class="btn btn-sm btn-blue" style="padding:4px 8px;border-radius:6px;min-width:28px" title="Call"><i class="fas fa-phone"></i></a>`:''}
-               ${m.phone && m.phone.trim()!=="-" ?`<button class="btn btn-sm btn-whatsapp" style="padding:4px 8px;border-radius:6px;min-width:28px" onclick="openWhatsApp('${esc(m.phone)}', 'Hi')" title="Chat on WhatsApp"><i class="fab fa-whatsapp"></i></button>`:''}
+               ${m.phone && m.phone.trim()!=="-" ?`<button class="btn btn-sm btn-whatsapp" style="padding:4px 8px;border-radius:6px;min-width:28px" onclick="openWhatsApp(${sj(m.phone)}, 'Hi')" title="Chat on WhatsApp"><i class="fab fa-whatsapp"></i></button>`:''}
                ${m.email && m.email.trim()!=="-" ?`<a href="mailto:${esc(m.email)}" class="btn btn-sm btn-amber" style="padding:4px 8px;border-radius:6px;min-width:28px" title="Email"><i class="fas fa-envelope"></i></a>`:''}
              </div>
           </td>
@@ -2359,14 +2688,14 @@ function renderClubResults(){
           <td data-label="${t('supervisor')}">${esc(dispName(sName)||"-")}</td>
           <td data-label="${t('payment')}"><b>${money(m.paymentToCoach||0)}</b>${m.paymentReceiver?`<br><small style="color:var(--text-muted)">${t('receivedBy')} ${esc(m.paymentReceiver)}</small>`:''}</td>
           <td data-label="${t('joinDate')}">${fmtDate(m.joinDate)}</td>
-          <td data-label="Address">${m.address ? `<div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end"><span style="white-space:normal;text-align:right">${esc(m.address)}</span><a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(m.address)}" target="_blank" rel="noopener" class="btn btn-sm btn-blue" style="padding:4px 8px;border-radius:6px;min-width:28px" title="Open in Maps"><i class="fas fa-location-dot"></i></a><button class="btn btn-sm btn-gray" style="padding:4px 8px;border-radius:6px;min-width:28px" onclick="copyAddress('${esc(m.id)}', this)" title="Copy Address"><i class="fas fa-copy"></i></button></div>` : '-'}</td>
+          <td data-label="Address">${m.address ? `<div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end"><span style="white-space:normal;text-align:right">${esc(m.address)}</span><a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(m.address)}" target="_blank" rel="noopener" class="btn btn-sm btn-blue" style="padding:4px 8px;border-radius:6px;min-width:28px" title="Open in Maps"><i class="fas fa-location-dot"></i></a><button class="btn btn-sm btn-gray" style="padding:4px 8px;border-radius:6px;min-width:28px" onclick="copyAddress(${sj(m.id)}, this)" title="Copy Address"><i class="fas fa-copy"></i></button></div>` : '-'}</td>
           <td data-label="Formula 1">${m.formula1Flavor?`<span class="badge bg-gray">${esc(m.formula1Flavor)}</span>`:'-'}</td>
           <td data-label="Afresh">${m.afreshFlavor?`<span class="badge bg-gray">${esc(m.afreshFlavor)}</span>`:'-'}</td>
           <td data-label="${t('kitsProgress')}"><div style="display:flex;gap:4px;flex-direction:column"><span class="badge ${m.firstKit==='completed'?'bg-green':'bg-amber'}">${t('kit1')}: ${m.firstKit==='completed'?t('completed'):t('pending')}</span><span class="badge ${m.secondKit==='completed'?'bg-green':'bg-amber'}">${t('kit2')}: ${m.secondKit==='completed'?t('completed'):t('pending')}</span></div></td>
           ${canWrite('club')?`<td data-label="${t('actions')}">
-             ${isSuperAdmin() ? `<button class="btn btn-sm btn-purple" onclick="rankModal('member', '${esc(m.id)}')" title="Change Rank"><i class="fas fa-exchange-alt"></i></button>` : ''}
-             <button class="btn btn-sm btn-gray" onclick="exportPersonCard('members','${esc(m.id)}',this)" title="Export Card"><i class="fas fa-id-card"></i></button>
-             <button class="btn btn-sm btn-gray" onclick='memberModal(${sj(m)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('members','${esc(m.id)}')"><i class="fas fa-trash"></i></button></td>`:''}
+             ${isSuperAdmin() ? `<button class="btn btn-sm btn-purple" onclick="rankModal('member', ${sj(m.id)})" title="Change Rank"><i class="fas fa-exchange-alt"></i></button>` : ''}
+             <button class="btn btn-sm btn-gray" onclick="exportPersonCard('members',${sj(m.id)},this)" title="Export Card"><i class="fas fa-id-card"></i></button>
+             <button class="btn btn-sm btn-gray" onclick='memberModal(${sj(m)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('members',${sj(m.id)})"><i class="fas fa-trash"></i></button></td>`:''}
         </tr>`}).join("")+`</tbody></table>` : `<div class="empty"><i class="fas fa-users"></i>No members found in this view</div>`;
 
   if(!statsEl) return;
@@ -2395,9 +2724,9 @@ window.manageFlavors = (kind, label) => {
   showModal(`
     <div class="modal-head"><h3>Manage ${esc(label)} Flavors</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
     <div id="flavorList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">
-      ${list.length ? list.map(f=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border:1px solid var(--border);border-radius:8px"><span style="font-weight:600">${esc(f)}</span><button class="alert-x-btn" onclick="deleteFlavor('${kind}','${label.replace(/'/g,"\\'")}','${esc(f).replace(/'/g,"\\'")}')" title="Delete"><i class="fas fa-times"></i></button></div>`).join("") : `<div class="empty" style="padding:20px"><i class="fas fa-list"></i>No flavors added yet</div>`}
+      ${list.length ? list.map(f=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border:1px solid var(--border);border-radius:8px"><span style="font-weight:600">${esc(f)}</span><button class="alert-x-btn" onclick="deleteFlavor(${sj(kind)},${sj(label)},${sj(f)})" title="Delete"><i class="fas fa-times"></i></button></div>`).join("") : `<div class="empty" style="padding:20px"><i class="fas fa-list"></i>No flavors added yet</div>`}
     </div>
-    <div class="modal-btns"><button class="btn btn-primary" style="width:100%" onclick="closeModal();addFlavorThenReopen('${kind}','${label.replace(/'/g,"\\'")}')"><i class="fas fa-plus"></i> Add New Flavor</button></div>
+    <div class="modal-btns"><button class="btn btn-primary" style="width:100%" onclick="closeModal();addFlavorThenReopen(${sj(kind)},${sj(label)})"><i class="fas fa-plus"></i> Add New Flavor</button></div>
   `);
 };
 window.addFlavorThenReopen = (kind, label) => {
@@ -2462,7 +2791,7 @@ window.memberModal=(m={})=>{
     </div>
   </div>
   <div class="form-group"><label>Notes</label><textarea id="m_notes">${esc(m.notes||"")}</textarea></div>
-  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveMember("${esc(m.id||"")}","${m.joinDate||""}")'>Save Member</button></div>`);
+  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveMember(${sj(m.id||"")},${sj(m.joinDate||"")})'>Save Member</button></div>`);
   // Sync the Supervisor field to the selected coach's supervisor right away too — covers
   // opening an existing (old) member whose coach was set before this auto-sync existed,
   // not just picking a coach live on a new entry.
@@ -2531,14 +2860,14 @@ function renderCoachesResults(){
         `<table><thead><tr><th>${t('name')}</th><th>${t('phone')}</th><th>${t('email')}</th><th>${t('uplineSup')}</th><th>${t('status')}</th>${canWrite('coaches')?`<th>${t('actions')}</th>`:''}</tr></thead><tbody>`+
         rows.map(c=>`<tr>
           <td data-label="${t('name')}"><div style="display:flex;gap:10px;align-items:flex-start">${avatarChip(c.name)}<div><div style="font-weight:700;color:var(--text)">${esc(dispName(c.name))}${c.level==='senior'?' <span class="badge bg-purple" style="font-size:.65rem;vertical-align:middle">Senior Coach</span>':''}</div><div style="margin-top:4px">${rankBadge(c.herbalifeRank)}</div>${c.lastEditedBy ? `<div style="font-size:.7rem;color:var(--text-muted);font-weight:500;margin-top:4px;letter-spacing:0"><i class="fas fa-user-edit" style="font-size:.65rem;margin-right:3px"></i> ${esc(c.lastEditedBy)}</div>` : ''}</div></div></td>
-          <td data-label="${t('phone')}"><div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end"><span style="white-space:nowrap">${esc(c.phone||"-")}</span> ${c.phone && c.phone.trim()!=="-" ?`<a href="tel:${esc(c.phone)}" class="btn btn-sm btn-blue" style="padding:4px 8px;border-radius:6px;min-width:28px" title="Call"><i class="fas fa-phone"></i></a>`:''}${c.phone && c.phone.trim()!=="-" ?`<button class="btn btn-sm btn-whatsapp" style="padding:4px 8px;border-radius:6px;min-width:28px" onclick="openWhatsApp('${esc(c.phone)}', 'Hi')" title="Chat on WhatsApp"><i class="fab fa-whatsapp"></i></button>`:''}</div></td>
+          <td data-label="${t('phone')}"><div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end"><span style="white-space:nowrap">${esc(c.phone||"-")}</span> ${c.phone && c.phone.trim()!=="-" ?`<a href="tel:${esc(c.phone)}" class="btn btn-sm btn-blue" style="padding:4px 8px;border-radius:6px;min-width:28px" title="Call"><i class="fas fa-phone"></i></a>`:''}${c.phone && c.phone.trim()!=="-" ?`<button class="btn btn-sm btn-whatsapp" style="padding:4px 8px;border-radius:6px;min-width:28px" onclick="openWhatsApp(${sj(c.phone)}, 'Hi')" title="Chat on WhatsApp"><i class="fab fa-whatsapp"></i></button>`:''}</div></td>
           <td data-label="${t('email')}"><div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end"><span style="white-space:nowrap">${esc(c.email||"-")}</span>${c.email && c.email.trim()!=="-" ?`<a href="mailto:${esc(c.email)}" class="btn btn-sm btn-amber" style="padding:4px 8px;border-radius:6px;min-width:28px" title="Email"><i class="fas fa-envelope"></i></a>`:''}</div></td>
           <td data-label="${t('supervisor')}">${esc(c.supervisorName||"-")}</td>
           <td data-label="${t('status')}"><span class="badge ${c.status==='active'?'bg-green':'bg-gray'}">${c.status}</span></td>
           ${canWrite('coaches')?`<td data-label="${t('actions')}">
-             ${isSuperAdmin() ? `<button class="btn btn-sm btn-purple" onclick="rankModal('coach', '${esc(c.id)}')" title="Change Rank"><i class="fas fa-exchange-alt"></i></button>` : ''}
-             <button class="btn btn-sm btn-gray" onclick="exportPersonCard('coaches','${esc(c.id)}',this)" title="Export Card"><i class="fas fa-id-card"></i></button>
-             <button class="btn btn-sm btn-gray" onclick='coachModal(${sj(c)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('coaches','${esc(c.id)}')"><i class="fas fa-trash"></i></button></td>`:''}
+             ${isSuperAdmin() ? `<button class="btn btn-sm btn-purple" onclick="rankModal('coach', ${sj(c.id)})" title="Change Rank"><i class="fas fa-exchange-alt"></i></button>` : ''}
+             <button class="btn btn-sm btn-gray" onclick="exportPersonCard('coaches',${sj(c.id)},this)" title="Export Card"><i class="fas fa-id-card"></i></button>
+             <button class="btn btn-sm btn-gray" onclick='coachModal(${sj(c)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('coaches',${sj(c.id)})"><i class="fas fa-trash"></i></button></td>`:''}
         </tr>`).join("")+`</tbody></table>` : `<div class="empty"><i class="fas fa-user-tie"></i>No coaches found</div>`;
 
   const statsEl=$("coaches_stats"); if(!statsEl) return;
@@ -2559,7 +2888,7 @@ window.coachModal=(c={})=>{
   <div class="form-group"><label>Coach Level</label><select id="c_level"><option value="regular"${(!c.level||c.level==='regular')?' selected':''}>Regular Coach</option><option value="senior"${c.level==='senior'?' selected':''}>Senior Coach (Supervisor-level)</option></select></div>
   <div class="form-group"><label>Herbalife Rank</label><select id="c_rank">${rankSelectOptions(c.herbalifeRank)}</select></div>
   <div class="form-group"><label>Status</label><select id="c_stat"><option value="active"${c.status==='active'?' selected':''}>Active</option><option value="inactive"${c.status==='inactive'?' selected':''}>Inactive</option></select></div>
-  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveCoach("${esc(c.id||"")}")'>Save</button></div>`);
+  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveCoach(${sj(c.id||"")})'>Save</button></div>`);
 };
 window.saveCoach=id=>{
   const name=$("c_name").value.trim(); if(!name) return toast("Coach Name required");
@@ -2610,15 +2939,15 @@ function renderSupervisorsResults(){
           const mc = memberCountsForSupervisor(d, s.id);
           return `<tr>
           <td data-label="${t('name')}"><div style="display:flex;gap:10px;align-items:flex-start">${avatarChip(s.name)}<div><div style="font-weight:700;color:var(--text)">${esc(dispName(s.name))}</div><div style="margin-top:4px">${rankBadge(s.herbalifeRank)}</div>${s.lastEditedBy ? `<div style="font-size:.7rem;color:var(--text-muted);font-weight:500;margin-top:4px;letter-spacing:0"><i class="fas fa-user-edit" style="font-size:.65rem;margin-right:3px"></i> ${esc(s.lastEditedBy)}</div>` : ''}</div></div></td>
-          <td data-label="${t('phone')}"><div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end"><span style="white-space:nowrap">${esc(s.phone||"-")}</span> ${s.phone && s.phone.trim()!=="-" ?`<a href="tel:${esc(s.phone)}" class="btn btn-sm btn-blue" style="padding:4px 8px;border-radius:6px;min-width:28px" title="Call"><i class="fas fa-phone"></i></a>`:''}${s.phone && s.phone.trim()!=="-" ?`<button class="btn btn-sm btn-whatsapp" style="padding:4px 8px;border-radius:6px;min-width:28px" onclick="openWhatsApp('${esc(s.phone)}', 'Hi')" title="Chat on WhatsApp"><i class="fab fa-whatsapp"></i></button>`:''}</div></td>
+          <td data-label="${t('phone')}"><div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end"><span style="white-space:nowrap">${esc(s.phone||"-")}</span> ${s.phone && s.phone.trim()!=="-" ?`<a href="tel:${esc(s.phone)}" class="btn btn-sm btn-blue" style="padding:4px 8px;border-radius:6px;min-width:28px" title="Call"><i class="fas fa-phone"></i></a>`:''}${s.phone && s.phone.trim()!=="-" ?`<button class="btn btn-sm btn-whatsapp" style="padding:4px 8px;border-radius:6px;min-width:28px" onclick="openWhatsApp(${sj(s.phone)}, 'Hi')" title="Chat on WhatsApp"><i class="fab fa-whatsapp"></i></button>`:''}</div></td>
           <td data-label="${t('email')}"><div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end"><span style="white-space:nowrap">${esc(s.email||"-")}</span>${s.email && s.email.trim()!=="-" ?`<a href="mailto:${esc(s.email)}" class="btn btn-sm btn-amber" style="padding:4px 8px;border-radius:6px;min-width:28px" title="Email"><i class="fas fa-envelope"></i></a>`:''}</div></td>
           <td data-label="${t('supervisor')}">${esc(s.supervisorName||"-")}</td>
           <td data-label="Members"><div style="display:flex;flex-direction:column;gap:3px;align-items:flex-end"><span class="badge bg-gray" title="Members this supervisor coaches directly">Direct: ${mc.direct}</span><span class="badge bg-gray" title="Members coached via this supervisor's coaches">Via Coaches: ${mc.viaCoaches}</span></div></td>
           <td data-label="${t('status')}"><span class="badge ${s.status==='active'?'bg-green':'bg-gray'}">${s.status}</span></td>
           ${canWrite('supervisors')?`<td data-label="${t('actions')}">
-             ${isSuperAdmin() ? `<button class="btn btn-sm btn-purple" onclick="rankModal('supervisor', '${esc(s.id)}')" title="Change Rank"><i class="fas fa-exchange-alt"></i></button>` : ''}
-             <button class="btn btn-sm btn-gray" onclick="exportPersonCard('supervisors','${esc(s.id)}',this)" title="Export Card"><i class="fas fa-id-card"></i></button>
-             <button class="btn btn-sm btn-gray" onclick='supModal(${sj(s)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('supervisors','${esc(s.id)}')"><i class="fas fa-trash"></i></button></td>`:''}
+             ${isSuperAdmin() ? `<button class="btn btn-sm btn-purple" onclick="rankModal('supervisor', ${sj(s.id)})" title="Change Rank"><i class="fas fa-exchange-alt"></i></button>` : ''}
+             <button class="btn btn-sm btn-gray" onclick="exportPersonCard('supervisors',${sj(s.id)},this)" title="Export Card"><i class="fas fa-id-card"></i></button>
+             <button class="btn btn-sm btn-gray" onclick='supModal(${sj(s)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('supervisors',${sj(s.id)})"><i class="fas fa-trash"></i></button></td>`:''}
         </tr>`;}).join("")+`</tbody></table>` : `<div class="empty"><i class="fas fa-user-shield"></i>No supervisors found</div>`;
 
   const statsEl=$("supervisors_stats"); if(!statsEl) return;
@@ -2644,7 +2973,7 @@ window.supModal=(s={})=>{
   <div class="form-group"><label>Login ID (Username)</label><input id="s_user" value="${esc(linkedUser?.username||"")}"></div>
   <div class="form-group"><label>PIN${linkedUser?' (leave blank to keep current)':' (min 4 digits)'}</label><input id="s_pin" value="" placeholder="${linkedUser?'••••':'e.g. 1234'}"></div>
   <button type="button" class="btn btn-gray" style="width:100%;margin-bottom:14px" onclick="autoFillSupLogin()"><i class="fas fa-dice"></i> Auto-fill Suggestion</button>
-  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveSup("${esc(s.id||"")}")'>Save</button></div>`);
+  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveSup(${sj(s.id||"")})'>Save</button></div>`);
 };
 window.autoFillSupLogin = () => {
   const name = $("s_name").value.trim();
@@ -2919,10 +3248,10 @@ window.mergeModal = (type, preKeep, preDupe) => {
   showModal(`
   <div class="modal-head"><h3><i class="fas ${MERGE_LABELS[type].icon}"></i> Merge ${MERGE_LABELS[type].title}</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
   <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:16px;line-height:1.4">Pick the duplicate record to remove and the record to keep. Every member, coach, or supervisor linked to the duplicate is automatically re-pointed to the record you keep before it's deleted — nothing gets orphaned.</p>
-  <div class="form-group"><label>Keep This Record</label><select id="merge_keep" onchange="renderMergePreview('${type}')"><option value="">-- Select --</option>${opts(preKeep)}</select></div>
-  <div class="form-group"><label>Merge & Delete This Record</label><select id="merge_dupe" onchange="renderMergePreview('${type}')"><option value="">-- Select --</option>${opts(preDupe)}</select></div>
+  <div class="form-group"><label>Keep This Record</label><select id="merge_keep" onchange="renderMergePreview(${sj(type)})"><option value="">-- Select --</option>${opts(preKeep)}</select></div>
+  <div class="form-group"><label>Merge & Delete This Record</label><select id="merge_dupe" onchange="renderMergePreview(${sj(type)})"><option value="">-- Select --</option>${opts(preDupe)}</select></div>
   <div id="mergePreview"></div>
-  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="confirmMerge('${type}')"><i class="fas fa-object-ungroup"></i> Merge</button></div>`);
+  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="confirmMerge(${sj(type)})"><i class="fas fa-object-ungroup"></i> Merge</button></div>`);
   if(preKeep && preDupe) renderMergePreview(type);
 };
 const MERGE_PREVIEW_FIELDS = [
@@ -3013,7 +3342,7 @@ function renderGiftsResults(){
           <td data-label="Date">${fmtDate(g.date)}</td>
           <td data-label="Recipient"><div style="display:flex;gap:10px;align-items:flex-start">${avatarChip(g.recipient)}<div><div style="font-weight:700;color:var(--text)">${esc(dispName(g.recipient))}</div>${g.lastEditedBy ? `<div style="font-size:.7rem;color:var(--text-muted);font-weight:500;margin-top:4px;letter-spacing:0"><i class="fas fa-user-edit" style="font-size:.65rem;margin-right:3px"></i> ${esc(g.lastEditedBy)}</div>` : ''}</div></div></td>
           <td data-label="Gift Details">${esc(g.description||"")}</td><td data-label="Occasion">${esc(g.occasion||"-")}</td><td data-label="Value" style="color:var(--primary);font-weight:700"><b>${money(g.value)}</b></td>
-          ${canWrite('gifts')?`<td data-label="${t('actions')}"><button class="btn btn-sm btn-gray" onclick='giftModal(${sj(g)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('gifts','${esc(g.id)}')"><i class="fas fa-trash"></i></button></td>`:''}
+          ${canWrite('gifts')?`<td data-label="${t('actions')}"><button class="btn btn-sm btn-gray" onclick='giftModal(${sj(g)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('gifts',${sj(g.id)})"><i class="fas fa-trash"></i></button></td>`:''}
         </tr>`).join("")+`</tbody></table>` : `<div class="empty"><i class="fas fa-gift"></i>No gifts logged yet</div>`;
 }
 window.giftModal=(g={})=>showModal(`
@@ -3023,7 +3352,7 @@ window.giftModal=(g={})=>showModal(`
   <div class="form-group"><label>Occasion</label><input id="g_occ" value="${esc(g.occasion||"")}" placeholder="e.g. Birthday, Anniversary"></div>
   <div class="form-group"><label>Estimated Value</label><input id="g_val" type="number" value="${g.value||""}"></div>
   <div class="form-group"><label>Date Given</label><input id="g_date" type="date" value="${g.date?new Date(g.date).toISOString().slice(0,10):""}"></div>
-  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveGift("${esc(g.id||"")}")'>Save Record</button></div>`);
+  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveGift(${sj(g.id||"")})'>Save Record</button></div>`);
 window.saveGift=id=>{
   const rec=$("g_rec").value.trim(); if(!rec) return toast("Recipient required");
   const dv=$("g_date").value;
@@ -3057,7 +3386,7 @@ function renderProductsResults(){
       <td data-label="Product Name"><div style="font-weight:700;color:var(--text)">${esc(p.name)}</div>${p.lastEditedBy?`<div style="font-size:.7rem;color:var(--text-muted);margin-top:4px"><i class="fas fa-user-edit" style="font-size:.65rem;margin-right:3px"></i>${esc(p.lastEditedBy)}</div>`:''}</td>
       <td data-label="Default Price" style="font-weight:700;color:var(--primary)">${money(p.defaultPrice||0)}</td>
       <td data-label="Unit">${esc(p.unit||"-")}</td>
-      ${canWrite('products')?`<td data-label="${t('actions')}"><button class="btn btn-sm btn-gray" onclick='productModal(${sj(p)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('products','${esc(p.id)}')"><i class="fas fa-trash"></i></button></td>`:''}
+      ${canWrite('products')?`<td data-label="${t('actions')}"><button class="btn btn-sm btn-gray" onclick='productModal(${sj(p)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('products',${sj(p.id)})"><i class="fas fa-trash"></i></button></td>`:''}
     </tr>`).join("")+`</tbody></table>` : `<div class="empty"><i class="fas fa-box"></i>No products in your catalog yet</div>`;
 }
 window.productModal=(p={})=>showModal(`
@@ -3065,7 +3394,7 @@ window.productModal=(p={})=>showModal(`
   <div class="form-group"><label>Product Name</label><input id="p_name" value="${esc(p.name||"")}" placeholder="e.g. Formula 1 Shake"></div>
   <div class="form-group"><label>Default Price</label><input id="p_price" type="number" inputmode="decimal" value="${p.defaultPrice||""}" placeholder="0"></div>
   <div class="form-group"><label>Unit (optional)</label><input id="p_unit" value="${esc(p.unit||"")}" placeholder="e.g. tin, box, piece"></div>
-  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveProduct("${esc(p.id||"")}")'>Save Product</button></div>`);
+  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveProduct(${sj(p.id||"")})'>Save Product</button></div>`);
 window.saveProduct=id=>{
   const name=$("p_name").value.trim(); if(!name) return toast("Product name required");
   commitItem('products', {
@@ -3099,10 +3428,10 @@ function renderQuotationsResults(){
       <td data-label="Items">${(q.items||[]).length} item${(q.items||[]).length===1?'':'s'}</td>
       <td data-label="Total" style="font-weight:700;color:var(--primary)">${money(q.grandTotal||0)}${q.invoiceNumber?`<div style="font-size:.68rem;font-weight:700;color:var(--text-muted);margin-top:3px;text-transform:none"><i class="fas fa-file-invoice" style="margin-right:3px"></i>${esc(q.invoiceNumber)}</div>`:''}</td>
       ${canWrite('quotations')?`<td data-label="${t('actions')}">
-        <button class="btn btn-sm btn-gray" onclick="exportQuotationPDF('${esc(q.id)}',this)" title="Export Quotation PDF"><i class="fas fa-file-pdf"></i></button>
-        <button class="btn btn-sm btn-blue" onclick="exportInvoicePDF('${esc(q.id)}',this)" title="${q.invoiceNumber?'Re-export Invoice':'Generate Invoice'}"><i class="fas fa-file-invoice-dollar"></i></button>
+        <button class="btn btn-sm btn-gray" onclick="exportQuotationPDF(${sj(q.id)},this)" title="Export Quotation PDF"><i class="fas fa-file-pdf"></i></button>
+        <button class="btn btn-sm btn-blue" onclick="exportInvoicePDF(${sj(q.id)},this)" title="${q.invoiceNumber?'Re-export Invoice':'Generate Invoice'}"><i class="fas fa-file-invoice-dollar"></i></button>
         <button class="btn btn-sm btn-gray" onclick='quotationModal(${sj(q)})'><i class="fas fa-pen"></i></button>
-        <button class="btn btn-sm btn-red" onclick="delItem('quotations','${esc(q.id)}')"><i class="fas fa-trash"></i></button>
+        <button class="btn btn-sm btn-red" onclick="delItem('quotations',${sj(q.id)})"><i class="fas fa-trash"></i></button>
       </td>`:''}
     </tr>`).join("")+`</tbody></table>` : `<div class="empty"><i class="fas fa-file-invoice-dollar"></i>No quotations yet</div>`;
 }
@@ -3139,7 +3468,7 @@ window.quotationModal=(q={})=>{
     <button type="button" class="btn btn-gray" style="width:100%;margin-top:10px" onclick="addQuoteLine()"><i class="fas fa-plus"></i> Add Item</button>
     <div id="quoteTotals" style="margin-top:16px"></div>
     <div class="form-group" style="margin-top:16px"><label>Notes</label><textarea id="q_notes">${esc(q.notes||"")}</textarea></div>
-    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveQuotation("${esc(q.id||"")}")'>Save Quotation</button></div>
+    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveQuotation(${sj(q.id||"")})'>Save Quotation</button></div>
   `);
   if(!quoteLineItems.length) addQuoteLine(); else renderQuoteItems();
 };
@@ -3483,7 +3812,7 @@ window.delItem=(coll,id)=>{
   showModal(`
     <div class="modal-head"><h3>${t('confirmDeleteTitle')}</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
     <p style="font-size:.9rem;color:var(--text-muted);margin-bottom:20px;line-height:1.5">${t('confirmDeleteMsg')} <b style="color:var(--text)">${esc(name)}</b>?</p>
-    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">${t('cancel')}</button><button class="btn btn-red" onclick="performDelete('${coll}','${id}')"><i class="fas fa-trash"></i> ${t('delete')}</button></div>
+    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">${t('cancel')}</button><button class="btn btn-red" onclick="performDelete(${sj(coll)},${sj(id)})"><i class="fas fa-trash"></i> ${t('delete')}</button></div>
   `);
 };
 // Reassigns anyone who pointed at a coach/supervisor record so they aren't left dangling
@@ -3586,8 +3915,8 @@ function renderRankSection(sec){
       <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:16px;line-height:1.4">Shows only coaches and supervisors whose rank is exactly ${esc(cfg.label)}.</p>
       <div class="stats" id="${sec}_stats" style="margin-bottom:20px"></div>
       <div class="filter-row">
-        <input id="search_${sec}" class="search" placeholder="Search by name..." value="${esc(rankSecSearch[sec])}" oninput="setRankSecSearch('${sec}', this.value)">
-        <select onchange="setRankSecTypeFilter('${sec}', this.value)">
+        <input id="search_${sec}" class="search" placeholder="Search by name..." value="${esc(rankSecSearch[sec])}" oninput="setRankSecSearch(${sj(sec)}, this.value)">
+        <select onchange="setRankSecTypeFilter(${sj(sec)}, this.value)">
           <option value="all"${rankSecTypeFilter[sec]==='all'?' selected':''}>All Types</option>
           <option value="coach"${rankSecTypeFilter[sec]==='coach'?' selected':''}>Coaches</option>
           <option value="supervisor"${rankSecTypeFilter[sec]==='supervisor'?' selected':''}>Supervisors</option>
@@ -3634,7 +3963,7 @@ function renderRankSectionResults(sec){
       <td data-label="${t('name')}"><div style="display:flex;gap:10px;align-items:center">${avatarChip(p.name)}<div style="font-weight:700;color:var(--text)">${esc(dispName(p.name))}</div></div></td>
       <td data-label="Type"><span class="badge bg-gray">${esc(p._typeLabel)}</span></td>
       ${extraCell}
-      ${canWrite(sec)?`<td data-label="${t('actions')}"><button class="btn btn-sm btn-purple" onclick="rankSectionModal('${sec}','${p._coll}','${esc(p.id)}')" title="Edit Rank / Status"><i class="fas fa-star"></i></button></td>`:''}
+      ${canWrite(sec)?`<td data-label="${t('actions')}"><button class="btn btn-sm btn-purple" onclick="rankSectionModal(${sj(sec)},${sj(p._coll)},${sj(p.id)})" title="Edit Rank / Status"><i class="fas fa-star"></i></button></td>`:''}
     </tr>`;}).join("")+`</tbody></table>` :
     `<div class="empty"><i class="fas ${cfg.icon}"></i>No one at ${esc(cfg.label)} in this view</div>`;
 }
@@ -3651,7 +3980,7 @@ window.rankSectionModal=(sec,coll,id)=>{
     <div class="modal-head"><h3>Edit: ${esc(person.name)}</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
     <div class="form-group"><label>Herbalife Rank</label><select id="rs_rank_select">${rankSelectOptions(person.herbalifeRank)}</select></div>
     ${extraHtml}
-    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveRankSection(this,'${sec}','${coll}','${esc(id)}')">Save</button></div>`);
+    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveRankSection(this,${sj(sec)},${sj(coll)},${sj(id)})">Save</button></div>`);
 };
 window.saveRankSection=async(btnEl,sec,coll,id)=>{
   const cfg = RANK_SECTIONS[sec];
@@ -3706,8 +4035,15 @@ window.exportJSON=async (btnEl)=>{
 };
 window.exportCSV=async (btnEl)=>{
   await withBtnFeedback(btnEl, "Preparing…", "transactions.csv", async ()=>{
-    const d=data(); const rows=[["Date","Customer","Product","Type","Amount","Status","Notes","Last Edited By"],...d.transactions.map(t=>[fmtDate(t.date),t.customer,t.product||"",t.type||"received",t.amount,t.status,(t.notes||"").replace(/[\n,]/g," "),t.lastEditedBy||""])];
-    dl(rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n"),"transactions.csv","text/csv");
+    const d=data(); const rows=[["Date","Customer","Product","Type","Amount","Status","Notes","Last Edited By","Client ID"],...d.transactions.map(t=>[fmtDate(t.date),t.customer,t.product||"",t.type||"received",t.amount,t.status,(t.notes||"").replace(/[\n,]/g," "),t.lastEditedBy||"",t.clientId||""])];
+    // PHASE 5 AUDIT ITEM #10 FIX: this used to quote/escape fields with plain `"` -> `""`
+    // doubling only, with no leading =/+/-/@ neutralization -- unlike rowsToCsv/csvSafeFieldClient
+    // (used elsewhere, e.g. the My Data CSV export), which IS tested against formula-injection
+    // payloads (see tests/privacy-csv-client.test.js). A transaction's Customer/Product/Notes/
+    // Client ID fields are all attacker-controllable, so this was a genuine, exploitable
+    // CSV/DDE formula-injection gap in the app's main financial export. Now routed through the
+    // same tested helper as every other CSV export in this file.
+    dl(rows.map(r=>r.map(c=>csvSafeFieldClient(c)).join(",")).join("\r\n"),"transactions.csv","text/csv");
   });
 };
 function dl(content,name,type){ const b=new Blob([content],{type}); const a=document.createElement("a"); a.href=URL.createObjectURL(b); a.download=name; a.click(); }
@@ -3745,14 +4081,24 @@ window.applyImport = (mode) => {
   }
   performApplyImport(mode);
 };
+// Import (backup restore) treats every incoming record as untrusted. An imported `id`, if
+// present, is normally just a previously-exported nid() value (safe to preserve, since that's
+// what lets a transaction's `clientId` keep resolving to the same client across a round-trip
+// export/import) — but a hand-edited or malicious backup file could supply anything as `id`.
+// Reject anything that doesn't look like a real generated ID and mint a fresh one instead,
+// rather than trusting arbitrary imported strings to flow onward into onclick handlers/CSS
+// selectors/etc. as if they were system-generated IDs.
+function safeImportId(raw){
+  return (typeof raw === "string" && /^[A-Za-z0-9_.-]{1,100}$/.test(raw)) ? raw : nid();
+}
 function performApplyImport(mode){
   const sd = pendingImportData; if(!sd) return;
   takeSnapshot(`Before JSON Import (${mode})`);
   const d=data();
-  ["transactions","members","gifts","coaches","supervisors"].forEach(c=>{ 
+  ["transactions","members","gifts","coaches","supervisors","clients"].forEach(c=>{
     if(!d[c]) d[c] = [];
     (sd[c]||[]).forEach(item=>{
-      const id=item.id||nid();
+      const id=safeImportId(item.id);
       const i = d[c].findIndex(x=>x.id===id);
       if(i>=0){ if(mode==='override') d[c][i] = {...item, id}; }
       else d[c].push({...item,id});
@@ -3763,7 +4109,7 @@ function performApplyImport(mode){
     Object.keys(sd.custom).forEach(sectionId=>{
       d.custom[sectionId] = d.custom[sectionId] || [];
       (sd.custom[sectionId]||[]).forEach(item=>{
-        const id=item.id||nid();
+        const id=safeImportId(item.id);
         const i = d.custom[sectionId].findIndex(x=>x.id===id);
         if(i>=0){ if(mode==='override') d.custom[sectionId][i] = {...item, id}; }
         else d.custom[sectionId].push({...item,id});
@@ -3883,7 +4229,7 @@ window.promptNewRole = () => {
   
   DB.permissions[roleId] = { dashboard:"view", marathon:"view", club:"view", coaches:"view", supervisors:"view", gifts:"view", backup:"hidden" };
   permSelectedRole = roleId;
-  save(true); renderPermissions(); toast(`Security role '${roleId}' instantiated`);
+  save(true); renderPermissions(); toast(`Security role '${esc(roleId)}' instantiated`);
 };
 
 const PERM_SECTIONS_BASE = () => [
@@ -3941,9 +4287,9 @@ function renderPermissionsGrid(){
               <div><div style="font-weight:800;color:var(--text);font-size:1rem">${esc(s.name)}</div><div style="font-size:.8rem;color:var(--text-muted);margin-top:2px;font-weight:500">${esc(s.desc)}</div></div>
             </div>
             <div class="seg-toggle" style="background:#f8fafc;padding:4px;border-radius:10px">
-              <label class="seg-btn ${lvl==='hidden'?'active':''}"><input type="radio" name="p_${s.id}" style="display:none" ${lvl==='hidden'?'checked':''} onchange="updatePerm('${s.id}','hidden')" ${permSelectedRole==='superadmin'?'disabled':''}><i class="fas fa-eye-slash"></i> Hidden</label>
-              <label class="seg-btn ${lvl==='view'?'active':''}"><input type="radio" name="p_${s.id}" style="display:none" ${lvl==='view'?'checked':''} onchange="updatePerm('${s.id}','view')" ${permSelectedRole==='superadmin'?'disabled':''}><i class="fas fa-eye"></i> View</label>
-              <label class="seg-btn ${lvl==='write'?'active':''}"><input type="radio" name="p_${s.id}" style="display:none" ${lvl==='write'?'checked':''} onchange="updatePerm('${s.id}','write')" ${permSelectedRole==='superadmin'?'disabled':''}><i class="fas fa-pen"></i> Write</label>
+              <label class="seg-btn ${lvl==='hidden'?'active':''}"><input type="radio" name="p_${s.id}" style="display:none" ${lvl==='hidden'?'checked':''} onchange="updatePerm(${sj(s.id)},'hidden')" ${permSelectedRole==='superadmin'?'disabled':''}><i class="fas fa-eye-slash"></i> Hidden</label>
+              <label class="seg-btn ${lvl==='view'?'active':''}"><input type="radio" name="p_${s.id}" style="display:none" ${lvl==='view'?'checked':''} onchange="updatePerm(${sj(s.id)},'view')" ${permSelectedRole==='superadmin'?'disabled':''}><i class="fas fa-eye"></i> View</label>
+              <label class="seg-btn ${lvl==='write'?'active':''}"><input type="radio" name="p_${s.id}" style="display:none" ${lvl==='write'?'checked':''} onchange="updatePerm(${sj(s.id)},'write')" ${permSelectedRole==='superadmin'?'disabled':''}><i class="fas fa-pen"></i> Write</label>
             </div>
           </div>`;
         }).join("") : `<div class="empty"><i class="fas fa-ghost"></i>No modules match your search</div>`;
@@ -4016,10 +4362,10 @@ function renderIndividualAccessGrid(){
               <div><div style="font-weight:800;color:var(--text);font-size:1rem">${esc(s.name)}</div><div style="font-size:.8rem;color:var(--text-muted);margin-top:2px;font-weight:500">Role default: ${esc(roleDefault)}</div></div>
             </div>
             <div class="seg-toggle" style="background:#f8fafc;padding:4px;border-radius:10px;flex-wrap:wrap">
-              <label class="seg-btn ${lvl==='default'?'active':''}"><input type="radio" name="i_${s.id}" style="display:none" ${lvl==='default'?'checked':''} onchange="updateIndivPerm('${s.id}','default')"><i class="fas fa-rotate-left"></i> Default</label>
-              <label class="seg-btn ${lvl==='hidden'?'active':''}"><input type="radio" name="i_${s.id}" style="display:none" ${lvl==='hidden'?'checked':''} onchange="updateIndivPerm('${s.id}','hidden')"><i class="fas fa-eye-slash"></i> Hidden</label>
-              <label class="seg-btn ${lvl==='view'?'active':''}"><input type="radio" name="i_${s.id}" style="display:none" ${lvl==='view'?'checked':''} onchange="updateIndivPerm('${s.id}','view')"><i class="fas fa-eye"></i> View</label>
-              <label class="seg-btn ${lvl==='write'?'active':''}"><input type="radio" name="i_${s.id}" style="display:none" ${lvl==='write'?'checked':''} onchange="updateIndivPerm('${s.id}','write')"><i class="fas fa-pen"></i> Write</label>
+              <label class="seg-btn ${lvl==='default'?'active':''}"><input type="radio" name="i_${s.id}" style="display:none" ${lvl==='default'?'checked':''} onchange="updateIndivPerm(${sj(s.id)},'default')"><i class="fas fa-rotate-left"></i> Default</label>
+              <label class="seg-btn ${lvl==='hidden'?'active':''}"><input type="radio" name="i_${s.id}" style="display:none" ${lvl==='hidden'?'checked':''} onchange="updateIndivPerm(${sj(s.id)},'hidden')"><i class="fas fa-eye-slash"></i> Hidden</label>
+              <label class="seg-btn ${lvl==='view'?'active':''}"><input type="radio" name="i_${s.id}" style="display:none" ${lvl==='view'?'checked':''} onchange="updateIndivPerm(${sj(s.id)},'view')"><i class="fas fa-eye"></i> View</label>
+              <label class="seg-btn ${lvl==='write'?'active':''}"><input type="radio" name="i_${s.id}" style="display:none" ${lvl==='write'?'checked':''} onchange="updateIndivPerm(${sj(s.id)},'write')"><i class="fas fa-pen"></i> Write</label>
             </div>
           </div>`;
         }).join("") : `<div class="empty"><i class="fas fa-ghost"></i>No modules match your search</div>`}
@@ -4094,14 +4440,14 @@ function renderAdmin(){
       ${DB.users.map(u=>{ 
         let actionBtns = '';
         if (isSuperAdmin() || (isAdmin() && (u.role !== 'superadmin' || u.id === currentUser.id))) {
-          actionBtns += `<button class="btn btn-sm btn-gray" onclick="userModal('${esc(u.id)}')" title="Edit Security Config"><i class="fas fa-cog"></i></button>`;
+          actionBtns += `<button class="btn btn-sm btn-gray" onclick="userModal(${sj(u.id)})" title="Edit Security Config"><i class="fas fa-cog"></i></button>`;
         }
         if (isSuperAdmin() && u.id !== currentUser.id) {
-          actionBtns += `<button class="btn btn-sm btn-amber" onclick="resetUserPin('${esc(u.id)}')" title="Reset PIN"><i class="fas fa-key"></i></button>`;
+          actionBtns += `<button class="btn btn-sm btn-amber" onclick="resetUserPin(${sj(u.id)})" title="Reset PIN"><i class="fas fa-key"></i></button>`;
         }
         if (u.id !== currentUser.id) {
-          if (isSuperAdmin() && u.role !== 'superadmin') actionBtns += `<button class="btn btn-sm btn-red" onclick="delUser('${esc(u.id)}')" title="Purge User"><i class="fas fa-trash"></i></button>`;
-          else if (isAdmin() && !isSuperAdmin() && u.role === 'user') actionBtns += `<button class="btn btn-sm btn-red" onclick="delUser('${esc(u.id)}')"><i class="fas fa-trash"></i></button>`;
+          if (isSuperAdmin() && u.role !== 'superadmin') actionBtns += `<button class="btn btn-sm btn-red" onclick="delUser(${sj(u.id)})" title="Purge User"><i class="fas fa-trash"></i></button>`;
+          else if (isAdmin() && !isSuperAdmin() && u.role === 'user') actionBtns += `<button class="btn btn-sm btn-red" onclick="delUser(${sj(u.id)})"><i class="fas fa-trash"></i></button>`;
         }
         
         let linkedName = "Unlinked Access";
@@ -4188,7 +4534,7 @@ window.userModal=(id)=>{
     <div class="form-group"><label>PIN${u?" (leave blank to keep current)":""}</label><input id="u_pin" inputmode="numeric" maxlength="16" value="" placeholder="${u?'••••':'e.g. 1234'}"></div>
     <div class="form-group"><label>Security Level (Role)</label><select id="u_role" ${!isSuperAdmin() && u && u.id===currentUser.id ? "disabled" : ""}>${roleOptions}</select></div>
     <div class="form-group"><label>Linked Staff Profile (For Data Scoping)</label><select id="u_link">${linkedOptions}</select></div>
-    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Abort</button><button class="btn btn-primary" onclick='saveUser("${esc(id||"")}")'>Execute Provision</button></div>`);
+    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Abort</button><button class="btn btn-primary" onclick='saveUser(${sj(id||"")})'>Execute Provision</button></div>`);
 };
 window.saveUser=async id=>{
   const name=$("u_name").value.trim(), pin=$("u_pin").value.trim();
@@ -4270,6 +4616,11 @@ function renderSettings(){
            see the block comment above the biometric functions for details. No setup path
            is offered here. -->
       <div id="bioSettingsBody"><span class="badge bg-gray"><i class="fas fa-ban"></i> Temporarily unavailable — this is being upgraded to a more secure implementation</span></div>
+    </div>
+    <div class="card" style="max-width:600px;margin:22px auto 0">
+      <div class="card-head"><span class="card-title"><i class="fas fa-user-shield" style="color:var(--primary);margin-right:10px"></i> Privacy Center</span></div>
+      <p style="font-size:.85rem;color:var(--text-muted);line-height:1.5;margin-bottom:14px">See what data is stored about you, manage your consent and preferences, request a correction or deletion, or raise a privacy concern.</p>
+      <button class="btn btn-primary" style="width:100%" onclick="go('privacy')"><i class="fas fa-arrow-right"></i> Open Privacy Center</button>
     </div>`;
 }
 window.changePin=async ()=>{
@@ -4287,6 +4638,509 @@ window.changePin=async ()=>{
     toast("PIN updated successfully");
   }catch(e){
     toast(e?.message?.includes("PIN is incorrect") ? "Current PIN is incorrect" : "Couldn't update PIN — try again");
+  }
+};
+
+/* ===== Privacy Center (DPDP-ready privacy system — Part B) =====
+
+   HONESTY NOTE (read before editing policy text below): this content must describe what the
+   app ACTUALLY does, not an idealized version of it. It was written from a direct source audit
+   of this codebase (see the Final Report). If you add a new integration, storage key, or
+   third-party script, update the matching section here in the same change — do not let this
+   drift out of sync with reality.
+
+   Legal/business fields the business owner must finalize are wrapped in [BRACKETS] on purpose —
+   do not replace them with invented values.
+*/
+const PRIVACY_POLICY_VERSION = "1.0";
+const TERMS_VERSION = "1.0";
+const COOKIE_POLICY_VERSION = "1.0";
+const REFUND_POLICY_VERSION = "1.0";
+
+const POLICY_CONTENT = {
+  privacy_policy: { version: PRIVACY_POLICY_VERSION, title: "Privacy Policy", body:
+`Last updated: [POLICY_EFFECTIVE_DATE] — Version ${PRIVACY_POLICY_VERSION}
+
+This Privacy Policy explains what personal data Money Matrix processes, why, and what control you have over it. It describes this application as it actually works today.
+
+1. WHO WE ARE
+[LEGAL_ENTITY_NAME] ("we", "us") operates Money Matrix. Registered address: [REGISTERED_ADDRESS]. This is a business-management tool used by your organization's staff to record clients, transactions, and related business records — it is not a public consumer app.
+
+2. WHAT WE COLLECT
+• Account information: username, role/access level, and a securely hashed PIN (never the PIN itself).
+• Profile information: display name, phone, email, and bio, if you choose to fill them in.
+• Business/customer records you or your organization enters: clients, transactions, gifts, products, quotations, team/member records, and any custom sections your organization has configured.
+• Login/security information: sign-in timestamps and session state, used to keep your account secure.
+• Activity/audit information: a log of who changed what, used for accountability within your organization.
+• Device/browser information: none is separately collected beyond what your browser sends as part of normal web requests (e.g. to load fonts/icons — see the Cookie & Storage Policy).
+We do not currently collect or infer any special category of personal data (health, biometric, precise location, etc.).
+
+3. WHY WE USE IT
+To operate your account, let your organization record and manage its own business data, secure the app (rate limiting, session control), and maintain an accountability trail (audit/activity logs). We do not use your data for advertising, and we do not sell personal data.
+
+4. DATA SHARING
+Your data is processed by:
+• Google Firebase (Authentication and Firestore database) — infrastructure processor, hosts the underlying data.
+• Cloudflare (Workers) — infrastructure processor, runs the server-side logic that authorizes every read/write.
+Within the app itself, what a colleague can see about your data depends on their role and access level, configured by your organization's administrators (see Access Control). We do not share your personal data with any other third party, and we do not have any marketing or analytics processor. If your organization later adds one, this section and the Privacy Preferences below will be updated before it goes live — not after.
+
+5. SECURITY SAFEGUARDS
+PINs are stored only as secure hashes, never in plain text. All data reads and writes are authorized server-side (no client has direct database access). Sessions expire automatically and can be forcibly revoked. Rate limiting protects sensitive endpoints from abuse.
+
+6. RETENTION
+See the Retention section of this Privacy Center for current configuration status. [RETENTION_PERIOD] — retention periods are a business decision your organization's administrators must finalize; until then, records are kept as long as your account/organization is active, plus any additional time required by applicable law.
+
+7. YOUR CONTROLS
+From this Privacy Center you can: view the data linked to your account ("My Data"), export it, request a correction, request deletion, manage your consent/preference records, and raise a privacy question or complaint.
+
+8. GRIEVANCE / CONTACT
+Grievance Officer: [GRIEVANCE_CONTACT]. Privacy contact email: [PRIVACY_EMAIL]. You can also submit a request directly through the "My Requests" tab of this Privacy Center — every request you submit is logged and tracked with a status.
+
+9. CHANGES TO THIS POLICY
+When this policy changes in a way that affects you, a new version is published here with a new effective date; you will not be asked to re-accept a version that hasn't changed.` },
+
+  terms_of_service: { version: TERMS_VERSION, title: "Terms of Service", body:
+`Last updated: [POLICY_EFFECTIVE_DATE] — Version ${TERMS_VERSION}
+
+1. ACCEPTABLE USE
+Money Matrix is provided for your organization's internal business record-keeping. Use it only for lawful purposes and only for the organization that provisioned your account.
+
+2. ACCOUNT RESPONSIBILITY
+You are responsible for keeping your PIN confidential and for activity that occurs under your account. Report any suspected unauthorized access immediately using the Privacy Request system.
+
+3. UNAUTHORIZED ACCESS
+Attempting to access data, accounts, or records beyond what your assigned role permits is prohibited.
+
+4. DATA ACCURACY
+You are responsible for the accuracy of records you personally enter. Use the Data Correction workflow in this Privacy Center if something needs fixing and you're not able to edit it directly.
+
+5. SERVICE AVAILABILITY
+The service is provided on an "as available" basis. [SERVICE_AVAILABILITY_TERMS] — specific uptime commitments, if any, are a business decision to be finalized separately.
+
+6. PROHIBITED MISUSE
+No attempts to bypass security controls, no introducing malicious code, no scraping or bulk-exporting data beyond your authorized "My Data" export.
+
+7. INTELLECTUAL PROPERTY
+The Money Matrix software and its design remain the property of [LEGAL_ENTITY_NAME] / its licensors.
+
+8. LIMITATION OF LIABILITY
+[LIMITATION_OF_LIABILITY_TERMS] — to be finalized by the business owner in line with applicable law; nothing here is a legal guarantee of any kind.
+
+9. TERMINATION
+[ACCOUNT_TERMINATION_TERMS] — an organization's administrators may deactivate accounts they manage; see the Data Deletion workflow for what happens to your data if your own account is deactivated.
+
+10. CHANGES
+Material changes are published as a new version here, with the effective date shown above.
+
+11. CONTACT
+[PRIVACY_EMAIL]` },
+
+  cookie_policy: { version: COOKIE_POLICY_VERSION, title: "Cookie & Storage Policy", body:
+`Last updated: [POLICY_EFFECTIVE_DATE] — Version ${COOKIE_POLICY_VERSION}
+
+Money Matrix does not use any tracking or advertising cookies, and does not run any analytics or marketing script (verified directly against this app's source — there is no Google Analytics, Meta Pixel, Sentry, Mixpanel, Hotjar, or similar SDK anywhere in this codebase). What it does use:
+
+BROWSER STORAGE (necessary — required for the app to function; there is no way to opt out of these without the app breaking, the same way you can't opt out of a filing cabinet holding your files):
+• sessionStorage (cleared when you close the tab): your sign-in session, login timestamp, and a couple of small UI-state flags (e.g. which in-app alerts you've dismissed this session).
+• localStorage (persists between visits, on your device only): a local cache of your organization's data for offline/fast reload, sync-status flags, remembered-login preference if you opt into it at login, and your last export timestamp. None of this is sent anywhere except back to our own servers as part of the normal sync process described in the Privacy Policy.
+• IndexedDB: used internally by the Firebase Authentication library for session persistence — this app does not write to IndexedDB directly itself.
+
+THIRD-PARTY ASSETS:
+• Google Fonts (fonts.googleapis.com) — loads webfont files. Google's font-serving infrastructure may see your IP address as part of that request, the same as loading any web font.
+• cdnjs (Cloudflare's CDN) — serves Font Awesome icons and two client-side libraries (SheetJS/xlsx and jsPDF) used to generate Excel/PDF files entirely on your own device; no business data is sent to these CDNs.
+• A WhatsApp link (wa.me) may appear in some places — this only opens WhatsApp with a pre-filled message if you actively click it; nothing is sent automatically.
+
+YOUR CONTROL: your browser's own settings let you clear localStorage/sessionStorage at any time (this will sign you out and clear the offline cache, not your account data, which lives on the server). There is no separate cookie-consent banner because this app sets no tracking cookies to consent to.` },
+
+  refund_policy: { version: REFUND_POLICY_VERSION, title: "Refund & Cancellation Policy", body:
+`Last updated: [POLICY_EFFECTIVE_DATE] — Version ${REFUND_POLICY_VERSION}
+
+Money Matrix itself (this software) does not currently sell anything or process payments for its own use within the app — it is an internal business tool. This section is a placeholder for your organization's OWN refund/cancellation terms if it sells products, memberships, or services THROUGH records it keeps in this app (e.g. club memberships, marathon payments) — those business transactions are between your organization and its customers, not with the software provider.
+
+If your organization does offer refunds/cancellations on its own transactions, finalize these fields:
+• Cancellation window: [CANCELLATION_WINDOW]
+• Eligibility: [REFUND_ELIGIBILITY]
+• Refund method: [REFUND_METHOD]
+• Processing time: [REFUND_PROCESSING_TIME]
+• Non-refundable items: [NON_REFUNDABLE_ITEMS]
+• Contact for refund requests: [PRIVACY_EMAIL]
+
+Until these are finalized, no refund process is promised by this policy.` },
+};
+
+let privacyTab = "overview";
+let privacyMyDataCache = null; // populated on demand by loadMyData(); never persisted to DB/localStorage
+
+function policyStatus(policyType){
+  const version = POLICY_CONTENT[policyType].version;
+  const mine = (DB.policyAcceptances && DB.policyAcceptances[currentUser.id]) || {};
+  const accepted = mine[policyType];
+  return { version, accepted: !!(accepted && accepted.version === version), acceptedVersion: accepted ? accepted.version : null, acceptedAt: accepted ? accepted.timestamp : null };
+}
+
+function renderPrivacyCenter(){
+  const tabs = [
+    { id:'overview', label:'Overview', icon:'fa-shield-alt' },
+    { id:'policies', label:'Policies', icon:'fa-file-contract' },
+    { id:'consent', label:'Consent & Preferences', icon:'fa-toggle-on' },
+    { id:'mydata', label:'My Data', icon:'fa-database' },
+    { id:'requests', label:'My Requests', icon:'fa-inbox' },
+  ];
+  if(isAdmin()) tabs.push({ id:'admin', label:'Admin Dashboard', icon:'fa-user-shield' });
+  if(!tabs.some(tb=>tb.id===privacyTab)) privacyTab = 'overview';
+  $("pageBody").innerHTML = `
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${tabs.map(tb=>`<button class="btn btn-sm ${privacyTab===tb.id?'btn-primary':'btn-gray'}" onclick="setPrivacyTab(${sj(tb.id)})"><i class="fas ${esc(tb.icon)}"></i> ${esc(tb.label)}</button>`).join("")}
+      </div>
+    </div>
+    <div id="privacyTabBody"></div>`;
+  renderPrivacyTabBody();
+}
+window.setPrivacyTab = (id) => { privacyTab = id; renderPrivacyCenter(); };
+function renderPrivacyTabBody(){
+  const el = $("privacyTabBody");
+  if(!el) return;
+  const fns = { overview: privacyOverviewHtml, policies: privacyPoliciesHtml, consent: privacyConsentHtml, mydata: privacyMyDataHtml, requests: privacyRequestsHtml, admin: privacyAdminHtml };
+  el.innerHTML = (fns[privacyTab] || privacyOverviewHtml)();
+  if(privacyTab === 'mydata' && privacyMyDataCache) renderMyDataPreview();
+}
+
+function privacyOverviewHtml(){
+  return `
+    <div class="card"><div class="card-head"><span class="card-title"><i class="fas fa-shield-alt" style="color:var(--primary);margin-right:8px"></i>Privacy Overview</span></div>
+      <p style="font-size:.9rem;line-height:1.6;color:var(--text-muted)">Money Matrix stores the account, profile, and business records your organization enters, so it can run your organization's day-to-day work and keep an accountability trail of who changed what. It does not run any advertising or analytics tracking, and does not sell personal data.</p>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:16px">
+        <div class="set-row" style="flex-direction:column;align-items:flex-start;gap:6px"><b><i class="fas fa-database" style="color:var(--primary)"></i> What's stored</b><span class="desc">Account, profile, and the business records you or your org enter</span></div>
+        <div class="set-row" style="flex-direction:column;align-items:flex-start;gap:6px"><b><i class="fas fa-bullseye" style="color:var(--primary)"></i> Why</b><span class="desc">To run your account and your organization's records — never advertising</span></div>
+        <div class="set-row" style="flex-direction:column;align-items:flex-start;gap:6px"><b><i class="fas fa-share-alt" style="color:var(--primary)"></i> Sharing</b><span class="desc">Only with Firebase/Cloudflare, the infrastructure this app runs on</span></div>
+        <div class="set-row" style="flex-direction:column;align-items:flex-start;gap:6px"><b><i class="fas fa-user-check" style="color:var(--primary)"></i> Your control</b><span class="desc">View, export, correct, or request deletion any time below</span></div>
+      </div>
+      <p style="font-size:.78rem;color:var(--text-muted);margin-top:16px;line-height:1.5">This Privacy Center is built to support India's Digital Personal Data Protection (DPDP) framework as it comes into force. It reflects the technical controls in place today — it is not a legal guarantee, and it doesn't make any claim about litigation risk.</p>
+    </div>`;
+}
+
+function privacyPoliciesHtml(){
+  const rows = Object.keys(POLICY_CONTENT).map(type=>{
+    const st = policyStatus(type);
+    return `<tr>
+      <td data-label="Policy"><b>${esc(POLICY_CONTENT[type].title)}</b></td>
+      <td data-label="Version">v${esc(st.version)}</td>
+      <td data-label="Your Status">${st.accepted ? `<span class="badge bg-green"><i class="fas fa-check"></i> Accepted</span>` : `<span class="badge bg-gray">Not yet accepted</span>`}</td>
+      <td data-label="Actions"><button class="btn btn-sm btn-blue" onclick="viewPolicy(${sj(type)})"><i class="fas fa-eye"></i> Read</button></td>
+    </tr>`;
+  }).join("");
+  return `<div class="card"><div class="card-head"><span class="card-title">Policies</span></div>
+    <div class="tbl-wrap"><table><thead><tr><th>Policy</th><th>Version</th><th>Your Status</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>
+  </div>`;
+}
+window.viewPolicy = (type) => {
+  const policy = POLICY_CONTENT[type];
+  if(!policy) return;
+  const st = policyStatus(type);
+  showModal(`<div class="modal-head"><h3>${esc(policy.title)} <span style="font-size:.75rem;color:var(--text-muted)">v${esc(policy.version)}</span></h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
+    <div style="max-height:55vh;overflow:auto;white-space:pre-wrap;font-size:.85rem;line-height:1.6;padding-right:6px">${esc(policy.body)}</div>
+    <div class="modal-btns">
+      <button class="btn btn-gray" onclick="closeModal()">Close</button>
+      ${st.accepted ? `<button class="btn btn-primary" disabled><i class="fas fa-check"></i> Already accepted (v${esc(st.acceptedVersion)})</button>` : `<button class="btn btn-primary" onclick="acceptPolicy(${sj(type)}, this)"><i class="fas fa-check"></i> I Accept This Version</button>`}
+    </div>`);
+};
+window.acceptPolicy = async (type, btnEl) => {
+  const policy = POLICY_CONTENT[type];
+  const handle = mmBtnBusy(btnEl, "Recording…");
+  if(!firebaseAvailable){
+    // HARDENING CORRECTION: privacy/security-sensitive operations must never be represented as
+    // submitted/recorded just because a local object was written to DB — see
+    // PART-B-HARDENING-REPORT.md section on offline privacy operations. There is no server to
+    // record this acceptance against in this mode, so it is refused, not faked.
+    handle.error("Unavailable offline");
+    toast("Privacy action unavailable offline — please reconnect and try again.");
+    return;
+  }
+  try{
+    await callWorkerApi("/privacy/policy/accept", { policyType: type, version: policy.version });
+    DB.policyAcceptances = DB.policyAcceptances || {};
+    DB.policyAcceptances[currentUser.id] = DB.policyAcceptances[currentUser.id] || {};
+    DB.policyAcceptances[currentUser.id][type] = { version: policy.version, timestamp: Date.now() };
+    handle.success("Recorded");
+    closeModal(); renderPrivacyCenter(); toast(`${policy.title} accepted`);
+  }catch(e){
+    handle.error("Failed");
+    toast("Couldn't record acceptance — try again");
+  }
+};
+
+function privacyConsentHtml(){
+  const prefs = (DB.privacyPreferences && DB.privacyPreferences[currentUser.id]) || { essential: true };
+  const consents = (DB.privacyConsents && DB.privacyConsents[currentUser.id]) || [];
+  return `
+    <div class="card"><div class="card-head"><span class="card-title">Privacy Preferences</span></div>
+      <p style="font-size:.82rem;color:var(--text-muted);margin-bottom:10px;line-height:1.5">This app does not currently run any analytics, marketing, or tracking processing — so there is nothing optional to toggle off yet. If that ever changes, a real control will appear here (not before).</p>
+      <div class="set-row">
+        <div><div style="font-weight:700;font-size:.9rem">Essential / Account Functionality</div><div class="desc">Required to operate your account — cannot be disabled</div></div>
+        <label class="toggle"><input type="checkbox" checked disabled><span class="slider"></span></label>
+      </div>
+    </div>
+    <div class="card"><div class="card-head"><span class="card-title">Consent Records</span></div>
+      <p style="font-size:.82rem;color:var(--text-muted);margin-bottom:10px;line-height:1.5">Any explicit consent you've given or withdrawn is logged here with a timestamp, for your own record.</p>
+      ${consents.length ? `<div class="tbl-wrap"><table><thead><tr><th>Type</th><th>Purpose</th><th>Status</th><th>When</th></tr></thead><tbody>${
+        consents.map(c=>`<tr><td data-label="Type">${esc(c.type)}</td><td data-label="Purpose">${esc(c.purpose)}</td><td data-label="Status"><span class="badge ${c.status==='granted'?'bg-green':'bg-gray'}">${esc(c.status)}</span></td><td data-label="When">${new Date(c.status==='withdrawn'?c.withdrawnAt:c.timestamp).toLocaleString()}</td></tr>`).join("")
+      }</tbody></table></div>` : `<div class="empty"><i class="fas fa-toggle-off"></i>No consent records yet</div>`}
+    </div>`;
+}
+
+async function fetchMyDataExport(){
+  if(!firebaseAvailable){
+    // Local-only fallback: this is a READ of already-existing local data, not a mutation, so it
+    // does not fabricate an authoritative "export" the way a fake success toast would -- but per
+    // the hardening requirement it must still be clearly labeled as local/cached, not treated as
+    // equivalent to a real server-verified export. isLocalOnly is surfaced in the UI below.
+    const p = DB.profiles[currentUser.id] || null;
+    return {
+      exportedAt: new Date().toISOString(),
+      isLocalOnly: true,
+      account: { id: currentUser.id, username: currentUser.username, role: currentUser.role, linkedId: currentUser.linkedId || null },
+      profile: p,
+      preferences: (DB.privacyPreferences && DB.privacyPreferences[currentUser.id]) || { essential: true },
+      consents: (DB.privacyConsents && DB.privacyConsents[currentUser.id]) || [],
+      policyAcceptances: (DB.policyAcceptances && DB.policyAcceptances[currentUser.id]) || {},
+      privacyRequests: (DB.privacyRequests || []).filter(r=>r.uid===currentUser.id),
+      ownActivityLog: (DB.activityLog || []).filter(a=>a.user===currentUser.username),
+      ownRecords: (DB.perUser && DB.perUser[currentUser.id]) || null,
+    };
+  }
+  const resp = await callWorkerApi("/privacy/export", {});
+  return resp.data.export;
+}
+
+function privacyMyDataHtml(){
+  return `
+    <div class="card"><div class="card-head"><span class="card-title">My Data</span></div>
+      <p style="font-size:.85rem;color:var(--text-muted);line-height:1.5;margin-bottom:12px">Load a snapshot of the personal/account data linked to your login, then export it as JSON or CSV.</p>
+      <button class="btn btn-primary" id="myDataLoadBtn" onclick="loadMyData(this)"><i class="fas fa-sync"></i> ${privacyMyDataCache ? 'Refresh My Data' : 'Load My Data'}</button>
+      <div id="myDataPreview" style="margin-top:16px"></div>
+    </div>`;
+}
+window.loadMyData = async (btnEl) => {
+  const handle = btnEl ? mmBtnBusy(btnEl, "Loading…") : null;
+  try{
+    privacyMyDataCache = await fetchMyDataExport();
+    if(handle) handle.success("Loaded");
+    renderMyDataPreview();
+  }catch(e){
+    if(handle) handle.error("Failed");
+    toast("Couldn't load your data — try again");
+  }
+};
+function renderMyDataPreview(){
+  const el = $("myDataPreview");
+  if(!el || !privacyMyDataCache) return;
+  const d = privacyMyDataCache;
+  el.innerHTML = `
+    ${d.isLocalOnly ? `<div class="badge bg-orange" style="margin-bottom:12px;display:inline-block"><i class="fas fa-plug-circle-exclamation"></i> Local/cached data — not a server-verified export (no connection)</div>` : ""}
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+      <button class="btn btn-sm btn-blue" onclick="downloadMyDataJson()"><i class="fas fa-file-code"></i> Download JSON</button>
+      <button class="btn btn-sm btn-purple" onclick="downloadMyDataCsv()"><i class="fas fa-file-csv"></i> Download CSV</button>
+    </div>
+    <div class="set-row"><div><b>Account</b><div class="desc">${esc(d.account?.username||"")} — ${esc(d.account?.role||"")}</div></div></div>
+    <div class="set-row"><div><b>Profile</b><div class="desc">${esc(d.profile?.displayName || "(not set)")} — ${esc(d.profile?.email||"")}</div></div></div>
+    <div class="set-row"><div><b>Consent records</b><div class="desc">${(d.consents||[]).length} record(s)</div></div></div>
+    <div class="set-row"><div><b>Policy acceptances</b><div class="desc">${Object.keys(d.policyAcceptances||{}).length} polic(y/ies) accepted</div></div></div>
+    <div class="set-row"><div><b>Privacy requests</b><div class="desc">${(d.privacyRequests||[]).length} request(s)</div></div></div>
+    <div class="set-row"><div><b>Own activity log entries</b><div class="desc">${(d.ownActivityLog||[]).length} entr(y/ies)</div></div></div>
+    <p style="font-size:.72rem;color:var(--text-muted);margin-top:10px">Exported ${esc(new Date(d.exportedAt).toLocaleString())}</p>`;
+}
+window.downloadMyDataJson = () => {
+  if(!privacyMyDataCache) return;
+  downloadTextFile(`money-matrix-my-data-${Date.now()}.json`, JSON.stringify(privacyMyDataCache, null, 2), "application/json");
+};
+window.downloadMyDataCsv = () => {
+  if(!privacyMyDataCache) return;
+  const d = privacyMyDataCache;
+  const sections = [];
+  sections.push(rowsToCsv([{ field:"username", value:d.account?.username }, { field:"role", value:d.account?.role }], ["field","value"], "ACCOUNT"));
+  sections.push(rowsToCsv((d.consents||[]).map(c=>({ type:c.type, purpose:c.purpose, status:c.status, timestamp:c.timestamp })), ["type","purpose","status","timestamp"], "CONSENTS"));
+  sections.push(rowsToCsv((d.privacyRequests||[]).map(r=>({ id:r.id, category:r.category, status:r.status, submittedAt:r.submittedAt })), ["id","category","status","submittedAt"], "PRIVACY REQUESTS"));
+  sections.push(rowsToCsv((d.ownActivityLog||[]).map(a=>({ ts:a.ts, action:a.action, user:a.user })), ["ts","action","user"], "ACTIVITY LOG"));
+  downloadTextFile(`money-matrix-my-data-${Date.now()}.csv`, sections.join("\r\n\r\n"), "text/csv");
+};
+function downloadTextFile(filename, content, mime){
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+  setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
+}
+
+// ---- CSV formula-injection safety (client-side mirror of cloudflare-worker/lib/privacy.js's
+// csvSafeField -- deliberately duplicated rather than shared, since this file has no build step
+// / module system to import from the Worker's lib/ directory). Tested in
+// tests/privacy-csv-client.test.js via the same extractFunction technique used for other
+// pure-logic functions in this file (see tests/import-security.test.js). ----
+function csvSafeFieldClient(value){
+  let s = value === null || value === undefined ? "" : String(value);
+  if(/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  if(/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+function rowsToCsv(rows, columns, sectionTitle){
+  const header = columns.map(c=>csvSafeFieldClient(c)).join(",");
+  const body = rows.map(row=>columns.map(c=>csvSafeFieldClient(row[c])).join(",")).join("\r\n");
+  return (sectionTitle ? csvSafeFieldClient(sectionTitle) + "\r\n" : "") + header + (body ? "\r\n" + body : "");
+}
+
+function privacyRequestsHtml(){
+  const mine = (DB.privacyRequests || []).filter(r=>r.uid===currentUser.id).sort((a,b)=>b.submittedAt-a.submittedAt);
+  const statusBadge = s => ({requested:'bg-gray',under_review:'bg-blue',approved:'bg-blue',completed:'bg-green',rejected:'bg-red',partially_completed:'bg-orange'}[s] || 'bg-gray');
+  return `
+    <div class="card"><div class="card-head"><span class="card-title">Submit a Request</span></div>
+      <div class="form-group"><label>Category</label><select id="pr_category">
+        <option value="access">Access my data</option>
+        <option value="correction">Correction — something is inaccurate</option>
+        <option value="consent_question">Question about consent</option>
+        <option value="complaint">Privacy complaint</option>
+        <option value="security_concern">Security/privacy concern</option>
+        <option value="other">Other</option>
+      </select></div>
+      <div class="form-group"><label>Description</label><textarea id="pr_desc" placeholder="Explain what you'd like — the more detail, the faster we can help" maxlength="4000"></textarea></div>
+      <button class="btn btn-primary" style="width:100%" onclick="submitPrivacyRequest(this)"><i class="fas fa-paper-plane"></i> Submit Request</button>
+      <hr style="margin:18px 0;border:none;border-top:1px solid var(--border)">
+      <button class="btn btn-red" style="width:100%" onclick="requestDeletion()"><i class="fas fa-trash-alt"></i> Request Account Deletion</button>
+      <p style="font-size:.75rem;color:var(--text-muted);margin-top:8px;line-height:1.4">Deletion is reviewed, not instant — submitting this creates a tracked request; it does not delete anything by itself.</p>
+    </div>
+    <div class="card"><div class="card-head"><span class="card-title">My Requests</span></div>
+      ${mine.length ? `<div class="tbl-wrap"><table><thead><tr><th>Category</th><th>Status</th><th>Submitted</th><th>Notes</th></tr></thead><tbody>${
+        mine.map(r=>`<tr><td data-label="Category">${esc(r.category)}</td><td data-label="Status"><span class="badge ${statusBadge(r.status)}">${esc(r.status.replace(/_/g,' '))}</span></td><td data-label="Submitted">${new Date(r.submittedAt).toLocaleDateString()}</td><td data-label="Notes">${esc(r.adminNotes||"—")}</td></tr>`).join("")
+      }</tbody></table></div>` : `<div class="empty"><i class="fas fa-inbox"></i>No requests submitted yet</div>`}
+    </div>`;
+}
+window.submitPrivacyRequest = async (btnEl) => {
+  const category = $("pr_category").value;
+  const description = $("pr_desc").value.trim();
+  if(!description){ toast("Please describe your request"); return; }
+  const handle = mmBtnBusy(btnEl, "Submitting…");
+  if(!firebaseAvailable){
+    // HARDENING CORRECTION: see acceptPolicy() above — no fabricated local "submission" for an
+    // authoritative privacy request when there's no server to submit it to.
+    handle.error("Unavailable offline");
+    toast("Privacy action unavailable offline — please reconnect and try again.");
+    return;
+  }
+  try{
+    const resp = await callWorkerApi("/privacy/request", { category, description });
+    DB.privacyRequests = [resp.data.request, ...(DB.privacyRequests||[])];
+    handle.success("Submitted");
+    $("pr_desc").value = "";
+    renderPrivacyTabBody();
+    toast("Request submitted");
+  }catch(e){
+    handle.error("Failed");
+    toast(e?.message?.includes("Too many") ? "Too many requests — please wait a bit and try again" : "Couldn't submit request — try again");
+  }
+};
+window.requestDeletion = () => {
+  showConfirmModal({
+    title: "Request Account Deletion",
+    message: "This creates a tracked request for an administrator to review. Your account is NOT deleted immediately — you'll see its status update in \"My Requests\" as it's reviewed and, if approved, completed.",
+    confirmLabel: "Request Deletion", danger: true,
+    onConfirm: async () => {
+      if(!firebaseAvailable){
+        // HARDENING CORRECTION: a deletion REQUEST is itself an authoritative privacy record —
+        // never fabricate one locally when there's no server to submit it to.
+        toast("Privacy action unavailable offline — please reconnect and try again.");
+        return;
+      }
+      try{
+        const resp = await callWorkerApi("/privacy/delete", { confirm: true });
+        DB.privacyRequests = [resp.data.request, ...(DB.privacyRequests||[])];
+        renderPrivacyTabBody();
+        toast("Deletion request submitted — an administrator will review it");
+      }catch(e){ toast("Couldn't submit deletion request — try again"); }
+    }
+  });
+};
+
+function privacyAdminHtml(){
+  if(!isAdmin()) return `<div class="empty"><i class="fas fa-lock"></i>Not authorized</div>`;
+  const all = (DB.privacyRequests || []).slice().sort((a,b)=>b.submittedAt-a.submittedAt);
+  const statusBadge = s => ({requested:'bg-gray',under_review:'bg-blue',approved:'bg-blue',completed:'bg-green',rejected:'bg-red',partially_completed:'bg-orange'}[s] || 'bg-gray');
+  const userName = uid => { const u = DB.users.find(x=>x.id===uid); return u ? (DB.profiles[uid]?.displayName || u.username) : uid; };
+  return `
+    <div class="card"><div class="card-head"><span class="card-title">Privacy Requests</span></div>
+      ${all.length ? `<div class="tbl-wrap"><table><thead><tr><th>From</th><th>Category</th><th>Status</th><th>Submitted</th><th>Actions</th></tr></thead><tbody>${
+        all.map(r=>`<tr>
+          <td data-label="From">${esc(userName(r.uid))}</td>
+          <td data-label="Category">${esc(r.category)}</td>
+          <td data-label="Status"><span class="badge ${statusBadge(r.status)}">${esc(r.status.replace(/_/g,' '))}</span></td>
+          <td data-label="Submitted">${new Date(r.submittedAt).toLocaleDateString()}</td>
+          <td data-label="Actions"><button class="btn btn-sm btn-blue" onclick="openPrivacyRequestDetail(${sj(r.id)})"><i class="fas fa-eye"></i> Review</button></td>
+        </tr>`).join("")
+      }</tbody></table></div>` : `<div class="empty"><i class="fas fa-inbox"></i>No privacy requests yet</div>`}
+    </div>
+    <div class="card"><div class="card-head"><span class="card-title">Policy Versions</span></div>
+      <p style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px;line-height:1.4">Policy TEXT is defined in code (POLICY_CONTENT); this only publishes the version/effective-date metadata that consent-acceptance is checked against. To change policy wording itself, edit POLICY_CONTENT and ship a new version number.</p>
+      <div class="tbl-wrap"><table><thead><tr><th>Type</th><th>Version</th><th>Effective</th><th>Status</th></tr></thead><tbody>${
+        (DB.policyVersions||[]).map(p=>`<tr><td data-label="Type">${esc(p.type)}</td><td data-label="Version">${esc(p.version)}</td><td data-label="Effective">${esc(p.effectiveDate)}</td><td data-label="Status"><span class="badge ${p.status==='published'?'bg-green':'bg-gray'}">${esc(p.status)}</span></td></tr>`).join("")
+      }</tbody></table></div>
+      <button class="btn btn-sm btn-primary" style="margin-top:12px" onclick="publishCurrentPolicyVersions(this)"><i class="fas fa-upload"></i> Publish Current Code Versions</button>
+    </div>`;
+}
+window.openPrivacyRequestDetail = (id) => {
+  const r = (DB.privacyRequests||[]).find(x=>x.id===id);
+  if(!r) return;
+  const u = DB.users.find(x=>x.id===r.uid);
+  const options = ["requested","under_review","approved","rejected","completed","partially_completed"];
+  showModal(`<div class="modal-head"><h3>Privacy Request</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
+    <div class="form-group"><label>From</label><input value="${esc(u?u.username:r.uid)}" disabled></div>
+    <div class="form-group"><label>Category</label><input value="${esc(r.category)}" disabled></div>
+    <div class="form-group"><label>Description</label><textarea disabled>${esc(r.description||"")}</textarea></div>
+    <div class="form-group"><label>Status</label><select id="pra_status">${options.map(o=>`<option value="${esc(o)}" ${r.status===o?'selected':''}>${esc(o.replace(/_/g,' '))}</option>`).join("")}</select></div>
+    <div class="form-group"><label>Admin Notes</label><textarea id="pra_notes" maxlength="4000">${esc(r.adminNotes||"")}</textarea></div>
+    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Close</button><button class="btn btn-primary" onclick="updatePrivacyRequestStatus(${sj(id)}, this)"><i class="fas fa-check"></i> Save</button></div>`);
+};
+window.updatePrivacyRequestStatus = async (id, btnEl) => {
+  const status = $("pra_status").value;
+  const adminNotes = $("pra_notes").value.trim();
+  const handle = mmBtnBusy(btnEl, "Saving…");
+  if(!firebaseAvailable){
+    // HARDENING CORRECTION: an admin status change is an authoritative privacy-record mutation —
+    // never applied locally-only and reported as saved.
+    handle.error("Unavailable offline");
+    toast("Privacy action unavailable offline — please reconnect and try again.");
+    return;
+  }
+  try{
+    const resp = await callWorkerApi("/privacy/request/status", { requestId: id, status, adminNotes });
+    const idx = (DB.privacyRequests||[]).findIndex(x=>x.id===id);
+    if(idx>-1) DB.privacyRequests[idx] = resp.data.request;
+    handle.success("Saved");
+    closeModal(); renderPrivacyTabBody(); toast("Request updated");
+  }catch(e){
+    handle.error("Failed");
+    toast("Couldn't update request — try again");
+  }
+};
+window.publishCurrentPolicyVersions = async (btnEl) => {
+  const handle = mmBtnBusy(btnEl, "Publishing…");
+  if(!firebaseAvailable){
+    // HARDENING CORRECTION: publishing a policy version is an authoritative, legally-relevant
+    // action — never applied locally-only and reported as published.
+    handle.error("Unavailable offline");
+    toast("Privacy action unavailable offline — please reconnect and try again.");
+    return;
+  }
+  try{
+    const today = new Date().toISOString().slice(0,10);
+    for(const [type, policy] of Object.entries(POLICY_CONTENT)){
+      const entry = { type, version: policy.version, effectiveDate: today, status: "published" };
+      const resp = await callWorkerApi("/privacy/policy/publish", entry);
+      DB.policyVersions = resp.data.policyVersions;
+    }
+    handle.success("Published");
+    renderPrivacyTabBody(); toast("Policy versions published");
+  }catch(e){
+    handle.error("Failed");
+    toast("Couldn't publish — try again");
   }
 };
 
@@ -4316,7 +5170,7 @@ function renderSectionManager(){
           <td data-label="Section"><i class="fas ${esc(cs.icon||'fa-folder')}" style="margin-right:8px;color:var(--primary)"></i><b>${esc(cs.label)}</b></td>
           <td data-label="Fields">${(cs.fields||[]).map(f=>esc(f.label)).join(", ")}</td>
           <td data-label="Records">${(data().custom?.[cs.id]||[]).length}</td>
-          <td data-label="${t('actions')}"><button class="btn btn-sm btn-purple" onclick="fieldsModal('${esc(cs.id)}')"><i class="fas fa-list"></i> Fields</button> <button class="btn btn-sm btn-blue" onclick="go('${esc(cs.id)}')"><i class="fas fa-eye"></i> Open</button> <button class="btn btn-sm btn-red" onclick="deleteCustomSection('${esc(cs.id)}')"><i class="fas fa-trash"></i></button></td>
+          <td data-label="${t('actions')}"><button class="btn btn-sm btn-purple" onclick="fieldsModal(${sj(cs.id)})"><i class="fas fa-list"></i> Fields</button> <button class="btn btn-sm btn-blue" onclick="go(${sj(cs.id)})"><i class="fas fa-eye"></i> Open</button> <button class="btn btn-sm btn-red" onclick="deleteCustomSection(${sj(cs.id)})"><i class="fas fa-trash"></i></button></td>
         </tr>`).join("")
       }</tbody></table>` : `<div class="empty"><i class="fas fa-folder-open"></i>No custom sections yet — create one above</div>`}</div>
       <p style="font-size:.8rem;color:var(--text-muted);margin-top:14px"><i class="fas fa-lock" style="margin-right:4px"></i>New sections start hidden for every role except Super Admin. Set who can view/edit each one in <b>Access Control</b>, or give an individual person access in <b>Individual Access</b>.</p>
@@ -4331,7 +5185,7 @@ window.createCustomSection = () => {
   Object.keys(DB.permissions).forEach(role=>{ if(role!=='superadmin') DB.permissions[role][id] = "hidden"; });
   DB.shared.custom = DB.shared.custom || {}; DB.shared.custom[id] = [];
   Object.values(DB.perUser||{}).forEach(u=>{ u.custom = u.custom || {}; u.custom[id] = []; });
-  save(true); toast(`"${label}" section created`); renderSectionManager();
+  save(true); toast(`"${esc(label)}" section created`); renderSectionManager();
 };
 window.deleteCustomSection = (id) => {
   const cs = (DB.customSections||[]).find(c=>c.id===id); if(!cs) return;
@@ -4349,7 +5203,7 @@ function performDeleteCustomSection(id){
   delete DB.shared.custom?.[id];
   Object.values(DB.perUser||{}).forEach(u=>{ if(u.custom) delete u.custom[id]; });
   if(activePage===id) activePage="sectionmanager";
-  save(true); toast(`"${cs.label}" deleted`); buildNav(); render();
+  save(true); toast(`"${esc(cs.label)}" deleted`); buildNav(); render();
 }
 
 // Field editor — lets you add/remove/rename fields on ANY section, whether it was just
@@ -4408,7 +5262,7 @@ window.saveFields = async (btnEl) => {
 let customSearch="";
 window.setCustomSearch=(v)=>{ customSearch=v.toLowerCase(); renderCustomSectionResults((DB.customSections||[]).find(c=>c.id===activePage)); };
 function renderCustomSection(cs){
-  const writeBtn = canWrite(cs.id) ? `<button class="btn btn-primary" onclick="customItemModal('${esc(cs.id)}')"><i class="fas fa-plus"></i> Add Entry</button>` : '';
+  const writeBtn = canWrite(cs.id) ? `<button class="btn btn-primary" onclick="customItemModal(${sj(cs.id)})"><i class="fas fa-plus"></i> Add Entry</button>` : '';
 
   $("pageBody").innerHTML = switcher() + `
     <div class="card"><div class="card-head"><span class="card-title">${esc(cs.label)}</span>${writeBtn}</div>
@@ -4437,7 +5291,7 @@ function renderCustomSectionResults(cs){
             const label = fi===0 ? `<div style="font-weight:700;color:var(--text)">${esc(val||"-")}</div>${r.lastEditedBy?`<div style="font-size:.7rem;color:var(--text-muted);margin-top:4px"><i class="fas fa-user-edit" style="font-size:.65rem;margin-right:3px"></i>${esc(r.lastEditedBy)}</div>`:''}` : esc(val||"-");
             return `<td data-label="${esc(f.label)}">${label}</td>`;
           }).join("")}
-          ${canWrite(cs.id)?`<td data-label="${t('actions')}"><button class="btn btn-sm btn-gray" onclick='customItemModal("${esc(cs.id)}",${sj(r)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delCustomItem('${esc(cs.id)}','${esc(r.id)}')"><i class="fas fa-trash"></i></button></td>`:''}
+          ${canWrite(cs.id)?`<td data-label="${t('actions')}"><button class="btn btn-sm btn-gray" onclick='customItemModal(${sj(cs.id)},${sj(r)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delCustomItem(${sj(cs.id)},${sj(r.id)})"><i class="fas fa-trash"></i></button></td>`:''}
         </tr>`).join("")+`</tbody></table>` : `<div class="empty"><i class="fas ${esc(cs.icon||'fa-folder')}"></i>No entries yet in ${esc(cs.label)}</div>`;
 }
 window.customItemModal = (sectionId, r={}) => {
@@ -4454,7 +5308,7 @@ window.customItemModal = (sectionId, r={}) => {
   showModal(`
   <div class="modal-head"><h3>${r.id?"Edit":"Add"} ${esc(cs?.label||"Entry")}</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
   ${inputHtml}
-  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveCustomItem("${esc(sectionId)}","${esc(r.id||"")}")'>Save</button></div>`);
+  <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveCustomItem(${sj(sectionId)},${sj(r.id||"")})'>Save</button></div>`);
 };
 window.saveCustomItem = (sectionId, id) => {
   const cs = (DB.customSections||[]).find(c=>c.id===sectionId);
@@ -4462,7 +5316,7 @@ window.saveCustomItem = (sectionId, id) => {
   const item = { id: id||nid(), ownerId: viewingAs||currentUser.id, lastEditedBy: getEditor() };
   for(const f of fields){
     const el = $("cu_"+f.key); const val = el ? el.value.trim() : "";
-    if(f.required && !val) return toast(`${f.label} is required`);
+    if(f.required && !val) return toast(`${esc(f.label)} is required`);
     item[f.key] = val;
   }
   const d = data(); d.custom = d.custom || {}; d.custom[sectionId] = d.custom[sectionId] || [];
@@ -4474,7 +5328,7 @@ window.delCustomItem = (sectionId, id) => {
   showModal(`
     <div class="modal-head"><h3>${t('confirmDeleteTitle')}</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
     <p style="font-size:.9rem;color:var(--text-muted);margin-bottom:20px;line-height:1.5">${t('confirmDeleteEntryMsg')}</p>
-    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">${t('cancel')}</button><button class="btn btn-red" onclick="performDeleteCustom('${sectionId}','${id}')"><i class="fas fa-trash"></i> ${t('delete')}</button></div>
+    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">${t('cancel')}</button><button class="btn btn-red" onclick="performDeleteCustom(${sj(sectionId)},${sj(id)})"><i class="fas fa-trash"></i> ${t('delete')}</button></div>
   `);
 };
 window.performDeleteCustom = (sectionId, id) => {

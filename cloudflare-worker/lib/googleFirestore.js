@@ -146,6 +146,19 @@ export async function firestoreGetDoc(env, accessToken, docPath) {
   return decodeFirestoreFields(json.fields || {});
 }
 
+/** Same read as firestoreGetDoc, but also returns Firestore's own `updateTime` string for the
+ * document (or null if it doesn't exist yet). This is what makes optimistic-concurrency writes
+ * possible — see writeAppDataIfUnchanged below — without needing a real Firestore transaction. */
+export async function firestoreGetDocWithMeta(env, accessToken, docPath) {
+  const resp = await fetch(firestoreDocUrl(env, docPath), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (resp.status === 404) return { fields: {}, updateTime: null, exists: false };
+  if (!resp.ok) throw new Error(`Firestore read failed for ${docPath} (${resp.status})`);
+  const json = await resp.json();
+  return { fields: decodeFirestoreFields(json.fields || {}), updateTime: json.updateTime || null, exists: true };
+}
+
 /** PATCHes (creates-or-replaces) the given fields on a document, without touching any other
  * top-level fields already on that document (Firestore's `updateMask` semantics). */
 export async function firestorePatchDoc(env, accessToken, docPath, fields) {
@@ -178,6 +191,62 @@ export async function readAppData(env, accessToken) {
 
 export async function writeAppData(env, accessToken, data) {
   return firestorePatchDoc(env, accessToken, "moneymatrix/appData", { json: JSON.stringify(data) });
+}
+
+/** Same read as readAppData, but also returns the document's `updateTime` so a caller can later
+ * write back conditionally on nothing else having changed it in the meantime (see
+ * writeAppDataIfUnchanged). Used by the /privacy/* handlers' optimistic-concurrency retry loop —
+ * see HARDENING ISSUE #4 in PART-B-HARDENING-REPORT.md for why this exists and what it does and
+ * does not solve. */
+export async function readAppDataWithVersion(env, accessToken) {
+  const { fields, updateTime } = await firestoreGetDocWithMeta(env, accessToken, "moneymatrix/appData");
+  let data;
+  try {
+    data = JSON.parse(fields.json || "{}");
+  } catch (e) {
+    data = {};
+  }
+  return { data, updateTime };
+}
+
+/** Conditionally writes moneymatrix/appData: the write is only applied if the document's
+ * updateTime on the server still matches `expectedUpdateTime` (Firestore's REST
+ * `currentDocument.updateTime` precondition — https://cloud.google.com/firestore/docs/reference/rest/v1/projects.databases.documents/patch).
+ * If the document changed since it was read (another request wrote in between), Firestore
+ * rejects the write with 409/FAILED_PRECONDITION and we return `{ conflict: true }` instead of
+ * throwing, so the caller can re-read and retry rather than silently losing the other write's
+ * changes (a lost-update race — see HARDENING ISSUE #4).
+ *
+ * If `expectedUpdateTime` is null (document didn't exist on our read), we instead require
+ * `currentDocument.exists = false` so two concurrent "create" writes can't stomp each other
+ * either. */
+export async function writeAppDataIfUnchanged(env, accessToken, data, expectedUpdateTime) {
+  const fieldPaths = ["json"];
+  const mask = fieldPaths.map((f) => `updateMask.fieldPaths=${encodeURIComponent(f)}`).join("&");
+  const precondition = expectedUpdateTime
+    ? `currentDocument.updateTime=${encodeURIComponent(expectedUpdateTime)}`
+    : `currentDocument.exists=false`;
+  const url = `${firestoreDocUrl(env, "moneymatrix/appData")}?${mask}&${precondition}`;
+  const resp = await fetch(url, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ fields: encodeFirestoreFields({ json: JSON.stringify(data) }) }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    // Google's REST error model maps a failed `currentDocument` precondition (our optimistic
+    // -concurrency check) to status "FAILED_PRECONDITION" (HTTP 400) or, on some paths,
+    // "ABORTED" (HTTP 409). Both mean exactly one thing: the document changed since we read it
+    // -- the safe response is "re-read and retry", not "give up" or "treat as success". Any
+    // OTHER error (malformed request, auth failure, etc.) is a real error and must NOT be
+    // silently retried as if it were a conflict, or a genuine bug could loop forever.
+    const status = err?.error?.status;
+    if (status === "FAILED_PRECONDITION" || status === "ABORTED") {
+      return { conflict: true };
+    }
+    throw new Error(`Firestore write failed for moneymatrix/appData (${resp.status}): ${JSON.stringify(err)}`);
+  }
+  return { conflict: false };
 }
 
 /** Bumps the tiny, non-sensitive meta timestamp doc the frontend's onSnapshot listener watches

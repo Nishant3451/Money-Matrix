@@ -6,12 +6,13 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node --test cloudflare-worker/tests/*.test.js"
+    "test": "node --test cloudflare-worker/tests/*.test.js tests/*.test.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3"
   },
   "devDependencies": {
+    "jsdom": "^25.0.0",
     "wrangler": "^3.78.0"
   }
 }

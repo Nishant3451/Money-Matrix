@@ -1,5 +1,20 @@
+# Dependencies
 node_modules/
-*.zip
-*.json
-!package.json
-!cloudflare-worker/package.json
+
+# Secrets -- never commit these. FIREBASE_PRIVATE_KEY / FIREBASE_CLIENT_EMAIL are set via
+# `wrangler secret put` (see cloudflare-worker/README.md), never written to a file in this repo.
+.env
+.env.*
+*.pem
+*.key
+service-account*.json
+*-firebase-adminsdk-*.json
+
+# Wrangler local state / local dev overrides
+.wrangler/
+.dev.vars
+
+# Editor / OS cruft
+.DS_Store
+*.log
+npm-debug.log*

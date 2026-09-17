@@ -172,13 +172,21 @@ function installFakeFetch(env, jwk) {
     if (u.includes("identitytoolkit.googleapis.com")) {
       const path = u.split("/").pop();
       env.__state.identityCalls.push({ path, body });
+      if (path === "accounts:signUp") {
+        // Faithfully reproduce the REAL Google behavior this whole fix is about: this
+        // client-facing, API-key method 404s when called with only an OAuth2 bearer token and
+        // no API key. If a regression ever reintroduces a call to this path, this mock makes
+        // the test fail with the SAME error production showed, instead of silently succeeding.
+        return new Response("{}", { status: 404 });
+      }
       if (path === "accounts:update") {
         if (body.localId && !(env.__state.__knownAuthUsers && env.__state.__knownAuthUsers.has(body.localId))) {
           return new Response(JSON.stringify({ error: { message: "There is no user record corresponding to this identifier. USER_NOT_FOUND" } }), { status: 400 });
         }
         return new Response(JSON.stringify({}), { status: 200 });
       }
-      if (path === "accounts:signUp") {
+      if (path === "accounts") {
+        // The CORRECT admin/OAuth2 user-creation endpoint (POST {base}/accounts, no ":signUp").
         env.__state.__knownAuthUsers = env.__state.__knownAuthUsers || new Set();
         env.__state.__knownAuthUsers.add(body.localId);
         return new Response(JSON.stringify({}), { status: 200 });
@@ -225,7 +233,7 @@ test.before(async () => {
 // LOGIN
 // ---------------------------------------------------------------------------------------------
 
-test("login: valid username/PIN succeeds, returns a custom token, and does NOT call accounts:signUp for an existing Auth user", async () => {
+test("login: valid username/PIN succeeds, returns a custom token, and does NOT call accounts:signUp (the broken endpoint) for an existing Auth user", async () => {
   const env = makeEnv({
     users: [{ id: "alice", username: "alice", role: "user", linkedId: null }],
     credentials: { alice: { pinHash: HASH_1234, role: "user" } },
@@ -240,12 +248,14 @@ test("login: valid username/PIN succeeds, returns a custom token, and does NOT c
   assert.ok(body.token, "should return a custom token");
 
   const signUpCalls = env.__state.identityCalls.filter((c) => c.path === "accounts:signUp");
-  assert.equal(signUpCalls.length, 0, "must NOT call accounts:signUp when the Auth user already exists");
+  assert.equal(signUpCalls.length, 0, "must NEVER call the broken accounts:signUp endpoint");
+  const createCalls = env.__state.identityCalls.filter((c) => c.path === "accounts");
+  assert.equal(createCalls.length, 0, "must not call the create endpoint at all when the Auth user already exists");
   const updateCalls = env.__state.identityCalls.filter((c) => c.path === "accounts:update");
   assert.ok(updateCalls.length >= 1, "must still persist claims via accounts:update");
 });
 
-test("login: a genuinely brand-new Auth user correctly falls back to accounts:signUp exactly once", async () => {
+test("login: a genuinely brand-new Auth user is created via the CORRECT endpoint (plain `accounts`, not `accounts:signUp`) exactly once", async () => {
   const env = makeEnv({
     users: [{ id: "brandnew", username: "brandnew", role: "user", linkedId: null }],
     credentials: { brandnew: { pinHash: HASH_1234, role: "user" } },
@@ -256,7 +266,9 @@ test("login: a genuinely brand-new Auth user correctly falls back to accounts:si
   const resp = await worker.fetch(req("/login", { body: { username: "brandnew", pin: "1234" } }), env, {});
   assert.equal(resp.status, 200);
   const signUpCalls = env.__state.identityCalls.filter((c) => c.path === "accounts:signUp");
-  assert.equal(signUpCalls.length, 1, "first-ever login for a new account should create the Auth record exactly once");
+  assert.equal(signUpCalls.length, 0, "must never call the broken accounts:signUp endpoint");
+  const createCalls = env.__state.identityCalls.filter((c) => c.path === "accounts");
+  assert.equal(createCalls.length, 1, "first-ever login for a new account should create the Auth record exactly once, via the correct endpoint");
 });
 
 test("login: wrong PIN is rejected with a generic message", async () => {
@@ -374,6 +386,54 @@ test("data/save: a scoped user's forged `users` role-escalation is dropped, but 
   assert.equal(env.__state.appData.shared.members[0].name, "Edited", "in-scope edit must persist");
 });
 
+test("data/save + data/get: a scoped user's own isolated clients round-trip end-to-end through the real HTTP handlers", async () => {
+  const { privateKey, publicJwk, kid } = await generateSecuretokenKeyPair();
+  const env = makeEnv({
+    users: [{ id: "sup_b", username: "sup_b", role: "user", linkedId: "supB" }],
+  });
+  env.__state.appData.shared = { supervisors: [{ id: "supB" }], members: [], coaches: [], transactions: [], gifts: [], clients: [] };
+  env.__state.appData.perUser = { sup_b: { transactions: [], members: [], gifts: [], coaches: [], supervisors: [], clients: [] } };
+  installFakeFetch(env, publicJwk);
+  const token = await signIdToken(privateKey, "sup_b", {}, kid);
+
+  const submitted = JSON.parse(JSON.stringify(env.__state.appData));
+  submitted.perUser.sup_b.clients.push({ id: "c1", name: "Rahul Patel", phone: "9876543210" });
+
+  const saveResp = await worker.fetch(req("/data/save", { headers: { Authorization: `Bearer ${token}` }, body: { json: JSON.stringify(submitted) } }), env, {});
+  assert.equal(saveResp.status, 200);
+  assert.deepEqual(env.__state.appData.perUser.sup_b.clients, [{ id: "c1", name: "Rahul Patel", phone: "9876543210" }], "client persisted server-side");
+
+  const getResp = await worker.fetch(req("/data/get", { headers: { Authorization: `Bearer ${token}` } }), env, {});
+  assert.equal(getResp.status, 200);
+  const { data } = await getResp.json();
+  const view = JSON.parse(data.json);
+  assert.deepEqual(view.perUser.sup_b.clients, [{ id: "c1", name: "Rahul Patel", phone: "9876543210" }], "client comes back on the next data/get");
+});
+
+test("data/save: a scoped user cannot write into another user's perUser clients via the real HTTP handler", async () => {
+  const { privateKey, publicJwk, kid } = await generateSecuretokenKeyPair();
+  const env = makeEnv({
+    users: [
+      { id: "sup_a", username: "sup_a", role: "user", linkedId: "supA" },
+      { id: "sup_b", username: "sup_b", role: "user", linkedId: "supB" },
+    ],
+  });
+  env.__state.appData.shared = { supervisors: [{ id: "supA" }, { id: "supB" }], members: [], coaches: [], transactions: [], gifts: [], clients: [] };
+  env.__state.appData.perUser = {
+    sup_a: { transactions: [], members: [], gifts: [], coaches: [], supervisors: [], clients: [] },
+    sup_b: { transactions: [], members: [], gifts: [], coaches: [], supervisors: [], clients: [] },
+  };
+  installFakeFetch(env, publicJwk);
+  const token = await signIdToken(privateKey, "sup_b", {}, kid);
+
+  const submitted = JSON.parse(JSON.stringify(env.__state.appData));
+  submitted.perUser.sup_a.clients.push({ id: "hacked", name: "Sneaky" }); // someone else's bucket
+
+  const resp = await worker.fetch(req("/data/save", { headers: { Authorization: `Bearer ${token}` }, body: { json: JSON.stringify(submitted) } }), env, {});
+  assert.equal(resp.status, 200);
+  assert.deepEqual(env.__state.appData.perUser.sup_a.clients, [], "sup_a's clients bucket must remain untouched by sup_b's save");
+});
+
 // ---------------------------------------------------------------------------------------------
 // /user/setPin — including session revocation
 // ---------------------------------------------------------------------------------------------
@@ -459,6 +519,139 @@ test("setPin: admin reset of an existing user's PIN succeeds and also revokes to
   assert.notEqual(env.__state.credentials.bob.pinHash, HASH_1234);
   const revokeCalls = env.__state.identityCalls.filter((c) => c.body?.validSince && c.body.localId === "bob");
   assert.equal(revokeCalls.length, 1);
+});
+
+// The following tests were added specifically to cover the accounts:signUp -> 404 production
+// bug: any existing-Auth-user PIN update reaches setClaimsEnsuringUserExists' accounts:update
+// call, which for a genuinely-already-existing Auth user should succeed directly and never
+// touch the create fallback at all. Before the fix, `env.__state.__knownAuthUsers` didn't even
+// matter for this failure mode in production (the bug was the URL, not the not-found branching)
+// — but modeling both "target's Auth record already exists" explicitly here is what lets these
+// tests tell the two failure modes apart.
+
+test("setPin (A): superadmin changes PIN of an EXISTING SUPERVISOR with unchanged role — Auth record already exists", async () => {
+  const { privateKey, publicJwk, kid } = await generateSecuretokenKeyPair();
+  const env = makeEnv({
+    users: [
+      { id: "sa", username: "sa", role: "superadmin" },
+      { id: "sup_a", username: "sup_a", role: "supervisor", linkedId: "supA" },
+    ],
+    credentials: { sa: { pinHash: HASH_1234, role: "superadmin" }, sup_a: { pinHash: HASH_1234, role: "supervisor" } },
+  });
+  env.__state.__knownAuthUsers = new Set(["sa", "sup_a"]); // both have logged in before
+  installFakeFetch(env, publicJwk);
+  const token = await signIdToken(privateKey, "sa", { role: "superadmin" }, kid);
+
+  const resp = await worker.fetch(
+    req("/user/setPin", { headers: { Authorization: `Bearer ${token}` }, body: { targetUserId: "sup_a", newPin: "9012" } }),
+    env,
+    {}
+  );
+  assert.equal(resp.status, 200);
+  assert.notEqual(env.__state.credentials.sup_a.pinHash, HASH_1234);
+  assert.equal(env.__state.credentials.sup_a.role, "supervisor", "role must stay unchanged when payload.role is omitted");
+  assert.equal(env.__state.appData.users.find((u) => u.id === "sup_a").role, "supervisor");
+  const createCalls = env.__state.identityCalls.filter((c) => c.path === "accounts" || c.path === "accounts:signUp");
+  assert.equal(createCalls.length, 0, "an existing Auth user's PIN change must never hit any account-creation endpoint");
+});
+
+test("setPin (B): superadmin resets PIN of an existing plain user, role unchanged, Auth record already exists", async () => {
+  const { privateKey, publicJwk, kid } = await generateSecuretokenKeyPair();
+  const env = makeEnv({
+    users: [
+      { id: "sa", username: "sa", role: "superadmin" },
+      { id: "carol", username: "carol", role: "user" },
+    ],
+    credentials: { sa: { pinHash: HASH_1234, role: "superadmin" }, carol: { pinHash: HASH_1234, role: "user" } },
+  });
+  env.__state.__knownAuthUsers = new Set(["sa", "carol"]);
+  installFakeFetch(env, publicJwk);
+  const token = await signIdToken(privateKey, "sa", { role: "superadmin" }, kid);
+
+  const resp = await worker.fetch(
+    req("/user/setPin", { headers: { Authorization: `Bearer ${token}` }, body: { targetUserId: "carol", newPin: "3344" } }),
+    env,
+    {}
+  );
+  assert.equal(resp.status, 200);
+  assert.notEqual(env.__state.credentials.carol.pinHash, HASH_1234);
+  assert.equal(env.__state.credentials.carol.role, "user");
+  const revokeCalls = env.__state.identityCalls.filter((c) => c.body?.validSince && c.body.localId === "carol");
+  assert.equal(revokeCalls.length, 1, "existing-user PIN reset must revoke refresh tokens");
+  const createCalls = env.__state.identityCalls.filter((c) => c.path === "accounts" || c.path === "accounts:signUp");
+  assert.equal(createCalls.length, 0);
+});
+
+test("setPin (D): superadmin creates a brand-new user's credentials via the CORRECT account-creation endpoint", async () => {
+  const { privateKey, publicJwk, kid } = await generateSecuretokenKeyPair();
+  const env = makeEnv({
+    users: [{ id: "sa", username: "sa", role: "superadmin" }],
+    credentials: { sa: { pinHash: HASH_1234, role: "superadmin" } },
+  });
+  env.__state.__knownAuthUsers = new Set(["sa"]); // "dave" does not exist yet anywhere
+  installFakeFetch(env, publicJwk);
+  const token = await signIdToken(privateKey, "sa", { role: "superadmin" }, kid);
+
+  const resp = await worker.fetch(
+    req("/user/setPin", { headers: { Authorization: `Bearer ${token}` }, body: { targetUserId: "dave", newPin: "1111", role: "user" } }),
+    env,
+    {}
+  );
+  assert.equal(resp.status, 200);
+  assert.ok(env.__state.credentials.dave, "credentials entry must be created");
+  assert.ok(env.__state.credentials.dave.pinHash.startsWith("$2"), "must store a bcrypt hash, never plaintext");
+  assert.ok(env.__state.appData.users.some((u) => u.id === "dave"), "users list must include the new account");
+  const createCalls = env.__state.identityCalls.filter((c) => c.path === "accounts");
+  assert.equal(createCalls.length, 1, "must create the Auth record via the correct plain `accounts` endpoint exactly once");
+  const brokenCalls = env.__state.identityCalls.filter((c) => c.path === "accounts:signUp");
+  assert.equal(brokenCalls.length, 0, "must never call the broken accounts:signUp endpoint");
+});
+
+test("setPin (G): the broken accounts:signUp endpoint is never called for ANY setUserPin operation, existing or new", async () => {
+  const { privateKey, publicJwk, kid } = await generateSecuretokenKeyPair();
+  const env = makeEnv({
+    users: [
+      { id: "sa", username: "sa", role: "superadmin" },
+      { id: "existing", username: "existing", role: "user" },
+    ],
+    credentials: { sa: { pinHash: HASH_1234, role: "superadmin" }, existing: { pinHash: HASH_1234, role: "user" } },
+  });
+  env.__state.__knownAuthUsers = new Set(["sa"]); // note: "existing" has an appData/credentials
+  // entry but (deliberately, for this test) no prior Auth login — the exact production
+  // scenario that used to 404.
+  installFakeFetch(env, publicJwk);
+  const token = await signIdToken(privateKey, "sa", { role: "superadmin" }, kid);
+
+  const resp = await worker.fetch(
+    req("/user/setPin", { headers: { Authorization: `Bearer ${token}` }, body: { targetUserId: "existing", newPin: "2222" } }),
+    env,
+    {}
+  );
+  assert.equal(resp.status, 200, "must succeed even when the target has never logged in before");
+  const brokenCalls = env.__state.identityCalls.filter((c) => c.path === "accounts:signUp");
+  assert.equal(brokenCalls.length, 0);
+});
+
+test("setPin (H): a failed operation returns a generic error with no internal detail, secret, or hash", async () => {
+  const { privateKey, publicJwk, kid } = await generateSecuretokenKeyPair();
+  const env = makeEnv({
+    users: [{ id: "u1", username: "u1", role: "user" }],
+    credentials: { u1: { pinHash: HASH_1234, role: "user" } },
+  });
+  installFakeFetch(env, publicJwk);
+  const token = await signIdToken(privateKey, "u1", {}, kid);
+  const resp = await worker.fetch(
+    req("/user/setPin", { headers: { Authorization: `Bearer ${token}` }, body: { targetUserId: "u1", currentPin: "0000", newPin: "9999" } }),
+    env,
+    {}
+  );
+  assert.equal(resp.status, 401);
+  const text = await resp.text();
+  assert.doesNotMatch(text, /\$2[aby]\$/, "response body must never contain a bcrypt hash");
+  assert.doesNotMatch(text, /Bearer |privateKey|BEGIN (RSA )?PRIVATE KEY/, "response body must never contain tokens/keys");
+  const parsed = JSON.parse(text);
+  assert.deepEqual(Object.keys(parsed), ["error"]);
+  assert.equal(parsed.error.message, "Current PIN is incorrect");
 });
 
 // ---------------------------------------------------------------------------------------------

@@ -33,6 +33,11 @@ export async function mintFirebaseCustomToken(env, uid, claims) {
 // sets custom claims on the Identity Platform user record so they survive the client's
 // automatic hourly token refresh (a one-time custom token's claims do NOT). Creates the Auth
 // user record first if this is genuinely their first-ever login.
+//
+// BUGFIX (this revision): the create-fallback below used to POST to `${base}/accounts:signUp`.
+// That endpoint is the CLIENT-facing, API-key-authenticated method and 404s when called this way
+// with only an OAuth2 bearer token. The correct admin/OAuth2 endpoint for creating a user
+// server-side is the plain resource path POST `${base}/accounts` (no `:signUp` suffix).
 export async function setClaimsEnsuringUserExists(env, accessToken, uid, claims) {
   const base = `https://identitytoolkit.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}`;
   const updateResp = await fetch(`${base}/accounts:update`, {
@@ -48,7 +53,7 @@ export async function setClaimsEnsuringUserExists(env, accessToken, uid, claims)
     throw new Error(`accounts:update failed (${updateResp.status}): ${JSON.stringify(errBody)}`);
   }
 
-  const createResp = await fetch(`${base}/accounts:signUp`, {
+  const createResp = await fetch(`${base}/accounts`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ localId: uid }),
@@ -58,7 +63,7 @@ export async function setClaimsEnsuringUserExists(env, accessToken, uid, claims)
     // uid may already exist despite the race above (two first-logins/creations at once) —
     // that's fine, fall through to the retry below either way.
     if (!createErr?.error?.message?.includes("DUPLICATE_LOCAL_ID")) {
-      throw new Error(`accounts:signUp failed (${createResp.status}): ${JSON.stringify(createErr)}`);
+      throw new Error(`accounts (create) failed (${createResp.status}): ${JSON.stringify(createErr)}`);
     }
   }
 
