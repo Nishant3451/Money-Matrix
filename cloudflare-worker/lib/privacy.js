@@ -54,7 +54,7 @@ export const PRIVACY_REQUEST_STATUSES = [
 
 const TERMINAL_STATUSES = new Set(["completed", "rejected", "partially_completed"]);
 
-export const POLICY_TYPES = ["privacy_policy", "terms_of_service", "cookie_policy", "refund_policy"];
+export const POLICY_TYPES = ["privacy_policy", "terms_of_service", "cookie_policy", "data_rights"];
 
 // Only "essential" is real today (see module comment). Any other key submitted by a client is
 // rejected rather than silently accepted, so the server never records consent for a category

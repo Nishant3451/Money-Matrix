@@ -4649,24 +4649,30 @@ window.changePin=async ()=>{
    third-party script, update the matching section here in the same change — do not let this
    drift out of sync with reality.
 
-   Legal/business fields the business owner must finalize are wrapped in [BRACKETS] on purpose —
-   do not replace them with invented values.
+   FINALIZED (18 September 2026): the four policies below reflect the business owner's supplied
+   legal/business details (entity, address, contact, effective date, liability and retention
+   wording). If a future business fact changes (e.g. a new processor is added, the entity name
+   changes), update the relevant POLICY_CONTENT body directly and bump that policy's version
+   constant so users are prompted to re-accept — do not silently edit accepted policy text.
 */
-const PRIVACY_POLICY_VERSION = "1.0";
-const TERMS_VERSION = "1.0";
-const COOKIE_POLICY_VERSION = "1.0";
-const REFUND_POLICY_VERSION = "1.0";
+const PRIVACY_POLICY_VERSION = "1.3";
+const TERMS_VERSION = "1.1";
+const COOKIE_POLICY_VERSION = "1.2";
+const DATA_RIGHTS_VERSION = "1.2";
 
 const POLICY_CONTENT = {
   privacy_policy: { version: PRIVACY_POLICY_VERSION, title: "Privacy Policy", body:
-`Last updated: [POLICY_EFFECTIVE_DATE] — Version ${PRIVACY_POLICY_VERSION}
+`Last updated: 18 September 2026 — Version ${PRIVACY_POLICY_VERSION}
 
 This Privacy Policy explains what personal data Money Matrix processes, why, and what control you have over it. It describes this application as it actually works today.
 
 1. WHO WE ARE
-[LEGAL_ENTITY_NAME] ("we", "us") operates Money Matrix. Registered address: [REGISTERED_ADDRESS]. This is a business-management tool used by your organization's staff to record clients, transactions, and related business records — it is not a public consumer app.
+Ketankumar Sheth ("we", "us") operates Money Matrix. This is a private business-management tool used by your organization's staff to record clients, transactions, and related business records — it is not a public consumer app.
 
-2. WHAT WE COLLECT
+2. WHO CAN ACCESS THIS APPLICATION
+Money Matrix is not open for public registration. A user account is created ("provisioned") for you by an Admin or Superadmin of your organization, and only Admin and Superadmin roles can administer user accounts — create, edit, deactivate, or remove them.
+
+3. WHAT WE COLLECT
 • Account information: username, role/access level, and a securely hashed PIN (never the PIN itself).
 • Profile information: display name, phone, email, and bio, if you choose to fill them in.
 • Business/customer records you or your organization enters: clients, transactions, gifts, products, quotations, team/member records, and any custom sections your organization has configured.
@@ -4675,38 +4681,38 @@ This Privacy Policy explains what personal data Money Matrix processes, why, and
 • Device/browser information: none is separately collected beyond what your browser sends as part of normal web requests (e.g. to load fonts/icons — see the Cookie & Storage Policy).
 We do not currently collect or infer any special category of personal data (health, biometric, precise location, etc.).
 
-3. WHY WE USE IT
+4. WHY WE USE IT
 To operate your account, let your organization record and manage its own business data, secure the app (rate limiting, session control), and maintain an accountability trail (audit/activity logs). We do not use your data for advertising, and we do not sell personal data.
 
-4. DATA SHARING
+5. DATA SHARING
 Your data is processed by:
 • Google Firebase (Authentication and Firestore database) — infrastructure processor, hosts the underlying data.
 • Cloudflare (Workers) — infrastructure processor, runs the server-side logic that authorizes every read/write.
 Within the app itself, what a colleague can see about your data depends on their role and access level, configured by your organization's administrators (see Access Control). We do not share your personal data with any other third party, and we do not have any marketing or analytics processor. If your organization later adds one, this section and the Privacy Preferences below will be updated before it goes live — not after.
 
-5. SECURITY SAFEGUARDS
-PINs are stored only as secure hashes, never in plain text. All data reads and writes are authorized server-side (no client has direct database access). Sessions expire automatically and can be forcibly revoked. Rate limiting protects sensitive endpoints from abuse.
+6. SECURITY SAFEGUARDS
+PINs are stored only as secure hashes, never in plain text. Protected application data reads and writes are authorized server-side. The client also subscribes to a lightweight metadata document used for synchronization notifications; it does not contain the application's protected business data. Sessions expire automatically and can be forcibly revoked. Rate limiting protects sensitive endpoints from abuse.
 
-6. RETENTION
-See the Retention section of this Privacy Center for current configuration status. [RETENTION_PERIOD] — retention periods are a business decision your organization's administrators must finalize; until then, records are kept as long as your account/organization is active, plus any additional time required by applicable law.
+7. RETENTION — ACCOUNT DELETION VS. BUSINESS RECORDS
+Deleting a user's login/account removes that user's access to Money Matrix; it does not delete the business records (clients, transactions, and other entries) that user made. Those records were entered on behalf of, and remain part of, your organization's business data, and are retained as organizational records after the login/account itself is deleted — see the Data Deletion & User Rights policy for full detail. No fixed retention period is specified beyond this: records are kept for as long as your organization's Money Matrix data is active, plus any additional time required by applicable law.
 
-7. YOUR CONTROLS
+8. YOUR CONTROLS
 From this Privacy Center you can: view the data linked to your account ("My Data"), export it, request a correction, request deletion, manage your consent/preference records, and raise a privacy question or complaint.
 
-8. GRIEVANCE / CONTACT
-Grievance Officer: [GRIEVANCE_CONTACT]. Privacy contact email: [PRIVACY_EMAIL]. You can also submit a request directly through the "My Requests" tab of this Privacy Center — every request you submit is logged and tracked with a status.
+9. GRIEVANCE / CONTACT
+Privacy / grievance contact: nishasheth345@gmail.com. You can also submit a request directly through the "My Requests" tab of this Privacy Center — every request you submit is logged and tracked with a status. No fixed response-time guarantee is currently provided for these requests.
 
-9. CHANGES TO THIS POLICY
+10. CHANGES TO THIS POLICY
 When this policy changes in a way that affects you, a new version is published here with a new effective date; you will not be asked to re-accept a version that hasn't changed.` },
 
   terms_of_service: { version: TERMS_VERSION, title: "Terms of Service", body:
-`Last updated: [POLICY_EFFECTIVE_DATE] — Version ${TERMS_VERSION}
+`Last updated: 18 September 2026 — Version ${TERMS_VERSION}
 
 1. ACCEPTABLE USE
-Money Matrix is provided for your organization's internal business record-keeping. Use it only for lawful purposes and only for the organization that provisioned your account.
+Money Matrix is a private, internal business-management application provided for your organization's internal record-keeping (clients, payments, team members, transactions, quotations, and other business records). Use it only for lawful purposes and only for the organization that provisioned your account. Money Matrix is provided free of charge — there are no subscription fees, paid plans, or charges for use of the application itself.
 
 2. ACCOUNT RESPONSIBILITY
-You are responsible for keeping your PIN confidential and for activity that occurs under your account. Report any suspected unauthorized access immediately using the Privacy Request system.
+Your account is provisioned for you by an Admin or Superadmin of your organization; Money Matrix is not open for public self-registration. You are responsible for keeping your PIN confidential and for activity that occurs under your account. Report any suspected unauthorized access immediately using the Privacy Request system.
 
 3. UNAUTHORIZED ACCESS
 Attempting to access data, accounts, or records beyond what your assigned role permits is prohibited.
@@ -4715,57 +4721,77 @@ Attempting to access data, accounts, or records beyond what your assigned role p
 You are responsible for the accuracy of records you personally enter. Use the Data Correction workflow in this Privacy Center if something needs fixing and you're not able to edit it directly.
 
 5. SERVICE AVAILABILITY
-The service is provided on an "as available" basis. [SERVICE_AVAILABILITY_TERMS] — specific uptime commitments, if any, are a business decision to be finalized separately.
+The service is provided on an "as available" basis. No specific uptime percentage or service-level guarantee is provided; the application may be temporarily unavailable for maintenance, updates, or reasons outside our control.
 
 6. PROHIBITED MISUSE
 No attempts to bypass security controls, no introducing malicious code, no scraping or bulk-exporting data beyond your authorized "My Data" export.
 
 7. INTELLECTUAL PROPERTY
-The Money Matrix software and its design remain the property of [LEGAL_ENTITY_NAME] / its licensors.
+The Money Matrix software and its design remain the property of Ketankumar Sheth / its licensors.
 
 8. LIMITATION OF LIABILITY
-[LIMITATION_OF_LIABILITY_TERMS] — to be finalized by the business owner in line with applicable law; nothing here is a legal guarantee of any kind.
+To the maximum extent permitted by applicable law, Money Matrix and its operator (Ketankumar Sheth) shall not be liable for indirect, incidental, consequential, special, exemplary, or business losses arising from or related to use of the application — including, without limitation, business interruption, loss of profits, losses arising from incorrect or incomplete records entered by users, decisions made using information stored in the CRM, temporary unavailability of the service, or unauthorized access resulting from a user's failure to protect their own credentials/PIN. Nothing in this section is intended to exclude or limit any liability that cannot lawfully be excluded or limited under applicable law.
 
-9. TERMINATION
-[ACCOUNT_TERMINATION_TERMS] — an organization's administrators may deactivate accounts they manage; see the Data Deletion workflow for what happens to your data if your own account is deactivated.
+9. ACCOUNT TERMINATION
+An organization's Admin or Superadmin may deactivate or remove accounts they manage. Deactivating or deleting a user's login/account removes that user's access to Money Matrix; it does not automatically delete the business records that user entered — those remain retained as organizational records. See the Data Deletion & User Rights policy for detail.
 
 10. CHANGES
 Material changes are published as a new version here, with the effective date shown above.
 
 11. CONTACT
-[PRIVACY_EMAIL]` },
+nishasheth345@gmail.com
+
+12. GOVERNING PRINCIPLE
+This is a private, internal business application. Nothing in these policies is intended to exclude or limit rights or obligations that cannot lawfully be excluded or limited under applicable law.` },
 
   cookie_policy: { version: COOKIE_POLICY_VERSION, title: "Cookie & Storage Policy", body:
-`Last updated: [POLICY_EFFECTIVE_DATE] — Version ${COOKIE_POLICY_VERSION}
+`Last updated: 18 September 2026 — Version ${COOKIE_POLICY_VERSION}
 
 Money Matrix does not use any tracking or advertising cookies, and does not run any analytics or marketing script (verified directly against this app's source — there is no Google Analytics, Meta Pixel, Sentry, Mixpanel, Hotjar, or similar SDK anywhere in this codebase). What it does use:
 
 BROWSER STORAGE (necessary — required for the app to function; there is no way to opt out of these without the app breaking, the same way you can't opt out of a filing cabinet holding your files):
 • sessionStorage (cleared when you close the tab): your sign-in session, login timestamp, and a couple of small UI-state flags (e.g. which in-app alerts you've dismissed this session).
-• localStorage (persists between visits, on your device only): a local cache of your organization's data for offline/fast reload, sync-status flags, remembered-login preference if you opt into it at login, and your last export timestamp. None of this is sent anywhere except back to our own servers as part of the normal sync process described in the Privacy Policy.
-• IndexedDB: used internally by the Firebase Authentication library for session persistence — this app does not write to IndexedDB directly itself.
+• localStorage (persists between visits, in your browser on your device): a local copy/cache of your organization's data for offline/fast reload, sync-status flags, a remembered-username preference if you opt into it at login (your PIN itself is never remembered or stored in browser storage), and your last export timestamp. This locally cached data is synchronized with the Money Matrix server as part of normal application operation (loading and saving your organization's records) — it is not permanently device-only.
 
 THIRD-PARTY ASSETS:
 • Google Fonts (fonts.googleapis.com) — loads webfont files. Google's font-serving infrastructure may see your IP address as part of that request, the same as loading any web font.
 • cdnjs (Cloudflare's CDN) — serves Font Awesome icons and two client-side libraries (SheetJS/xlsx and jsPDF) used to generate Excel/PDF files entirely on your own device; no business data is sent to these CDNs.
 • A WhatsApp link (wa.me) may appear in some places — this only opens WhatsApp with a pre-filled message if you actively click it; nothing is sent automatically.
+None of these third-party assets are advertising or tracking services — they serve fonts, icons, client-side libraries, or an optional outbound link.
 
 YOUR CONTROL: your browser's own settings let you clear localStorage/sessionStorage at any time (this will sign you out and clear the offline cache, not your account data, which lives on the server). There is no separate cookie-consent banner because this app sets no tracking cookies to consent to.` },
 
-  refund_policy: { version: REFUND_POLICY_VERSION, title: "Refund & Cancellation Policy", body:
-`Last updated: [POLICY_EFFECTIVE_DATE] — Version ${REFUND_POLICY_VERSION}
+  data_rights: { version: DATA_RIGHTS_VERSION, title: "Data Deletion & User Rights", body:
+`Last updated: 18 September 2026 — Version ${DATA_RIGHTS_VERSION}
 
-Money Matrix itself (this software) does not currently sell anything or process payments for its own use within the app — it is an internal business tool. This section is a placeholder for your organization's OWN refund/cancellation terms if it sells products, memberships, or services THROUGH records it keeps in this app (e.g. club memberships, marathon payments) — those business transactions are between your organization and its customers, not with the software provider.
+This policy explains the rights you have over the data linked to your Money Matrix account, and exactly what each request does and does not do.
 
-If your organization does offer refunds/cancellations on its own transactions, finalize these fields:
-• Cancellation window: [CANCELLATION_WINDOW]
-• Eligibility: [REFUND_ELIGIBILITY]
-• Refund method: [REFUND_METHOD]
-• Processing time: [REFUND_PROCESSING_TIME]
-• Non-refundable items: [NON_REFUNDABLE_ITEMS]
-• Contact for refund requests: [PRIVACY_EMAIL]
+1. VIEWING AND EXPORTING YOUR DATA
+From the "My Data" tab of this Privacy Center, you can view and export (JSON or CSV) the data linked to your account at any time — no request or approval is needed for this. This includes your account/profile information and records associated with your user-specific records area. These records may have been entered by you on behalf of the organization and remain organizational business records; this does not mean that you personally own them. It does not include your organization's full shared business records, which remain organizational records as described below.
 
-Until these are finalized, no refund process is promised by this policy.` },
+2. REQUESTING A CORRECTION
+If something linked to your account is inaccurate and you cannot edit it directly, submit a Correction request from the "My Requests" tab. It is logged and tracked with a status until an administrator resolves it.
+
+3. REQUESTING DELETION
+You can submit a Request Account Deletion request from the "My Requests" tab. Submitting this request does NOT instantly delete anything. It creates a tracked request that an Admin or Superadmin must review; you can follow its status ("requested", "under review", "approved", "rejected", "completed", or "partially completed") in "My Requests". There is currently no self-service control that immediately and irreversibly deletes your account or data — every deletion request goes through administrator review first.
+
+4. WHAT ACCOUNT DELETION DOES AND DOES NOT DO
+If a deletion request is approved and completed:
+• Your login/account access to Money Matrix is removed.
+• Business records you entered (clients, transactions, quotations, and similar entries) are NOT automatically deleted along with your account. Those records were made on behalf of, and remain part of, your organization's business data, and are retained as organizational records.
+These business records are organizational records, not your personal property — entering a record on your organization's behalf does not make you its personal owner. Deletion of your login/account must not be understood as deletion of all business records connected to your activity — the two are separate.
+
+5. RESPONSE TIME
+No fixed response-time guarantee (SLA) is currently provided for correction, deletion, or other privacy requests. Requests are reviewed by your organization's Admin/Superadmin as part of the administrator-reviewed workflow described above.
+
+6. CONSENT AND PREFERENCE RECORDS
+The "Consent & Preferences" tab lets you view and manage your recorded acceptances of these policies.
+
+7. CONTACT / GRIEVANCES
+For privacy requests, corrections, deletion requests, or grievances, use the "My Requests" tab of this Privacy Center, or contact nishasheth345@gmail.com directly.
+
+8. CHANGES
+Material changes to this policy are published as a new version here, with the effective date shown above.` },
 };
 
 let privacyTab = "overview";

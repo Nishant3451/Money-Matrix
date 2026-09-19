@@ -35,9 +35,16 @@ export async function mintFirebaseCustomToken(env, uid, claims) {
 // user record first if this is genuinely their first-ever login.
 //
 // BUGFIX (this revision): the create-fallback below used to POST to `${base}/accounts:signUp`.
-// That endpoint is the CLIENT-facing, API-key-authenticated method and 404s when called this way
-// with only an OAuth2 bearer token. The correct admin/OAuth2 endpoint for creating a user
-// server-side is the plain resource path POST `${base}/accounts` (no `:signUp` suffix).
+// That endpoint is the CLIENT-facing, API-key-authenticated method (the REST equivalent of
+// createUserWithEmailAndPassword) — per Google's own Identity Platform REST reference
+// ("Method: projects.accounts"), it 404s when called this way with only an OAuth2 service-
+// account bearer token and no API key. The correct admin/OAuth2 endpoint for creating a user
+// server-side is the plain resource path `POST {base}/accounts` (no `:signUp` suffix) — that's
+// what the Admin SDK itself calls under the hood. This was a real, reachable production bug:
+// any setUserPin call whose target had no existing Firebase Auth record yet (a brand-new
+// account, or an existing appData/credentials entry that had simply never logged in before)
+// would hit accounts:update -> USER_NOT_FOUND -> the broken accounts:signUp fallback -> 404,
+// surfaced to the caller as a generic 500. Fixed by using `${base}/accounts` below.
 export async function setClaimsEnsuringUserExists(env, accessToken, uid, claims) {
   const base = `https://identitytoolkit.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}`;
   const updateResp = await fetch(`${base}/accounts:update`, {
