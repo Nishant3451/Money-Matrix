@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <meta name="theme-color" content="#146356" />
+<meta name="app-build" content="2026-09-21-privacy-nav+payments+quickadd" />
 <title>MoneyMatrix - Enterprise Edition</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -627,6 +628,11 @@
 <div id="updateBanner"><span><i class="fas fa-circle-up" style="margin-right:8px"></i> A new version of MoneyMatrix is ready.</span><button onclick="applyUpdate()">Refresh Now</button></div>
 
 <script type="module">
+// Build marker: identifies which source a deployed copy was built from. Also present as
+// <meta name="app-build"> in <head> (readable via view-source / curl without logging in) and
+// shown at the bottom of the Privacy Center overview. Bump this string on each release.
+const APP_BUILD = "2026-09-21-privacy-nav+payments+quickadd";
+try{ console.info("MoneyMatrix build:", APP_BUILD); }catch(e){}
 // Firebase is loaded dynamically and wrapped in try/catch. A static `import` at the top of
 // a module throws synchronously if the CDN can't be reached (blocked network, offline, a
 // sandboxed preview, etc.) — and when that happens the ENTIRE script stops executing, so
@@ -1248,7 +1254,7 @@ const focusRestore = (fn, id) => {
 
 const getEditor = () => DB.profiles[currentUser.id]?.displayName || currentUser.username;
 const ACTIVITY_LABELS = {
-  transactions:{icon:'fa-running',label:'Marathon Payment',nameKey:'customer'},
+  transactions:{icon:'fa-running',label:'Payment',nameKey:'customer'},
   members:{icon:'fa-user',label:'Member',nameKey:'name'},
   coaches:{icon:'fa-user-tie',label:'Coach',nameKey:'name'},
   supervisors:{icon:'fa-user-shield',label:'Supervisor',nameKey:'name'},
@@ -1837,7 +1843,7 @@ $("usernameInput").addEventListener("keydown",e=>{ if(e.key==="Enter") { const b
 /* ===== UI labels (English only) ===== */
 const I18N = {
   en: {
-    dashboard:"Dashboard", marathon:"Marathon Payments", club:"Club Membership", coaches:"Club Coaches",
+    dashboard:"Dashboard", marathon:"Payments", club:"Club Membership", coaches:"Club Coaches",
     supervisors:"Supervisors", gifts:"Gifts & Rewards", worldteam:"World Team", getteam:"GET Team",
     milteam:"Millionaire Team", presteam:"President's Team", backup:"Data Management", admin:"User Management",
     permissions:"Access Control", individualaccess:"Individual Access", sectionmanager:"Custom Sections",
@@ -1867,7 +1873,7 @@ function dispName(name){ return name||""; }
 
 const NAV=[
   {id:"dashboard",label:"Dashboard",icon:"fa-chart-pie", req:"dashboard", section:"Overview"},
-  {id:"marathon",label:"Marathon Payments",icon:"fa-running", req:"marathon", section:"Operations"},
+  {id:"marathon",label:"Payments",icon:"fa-running", req:"marathon", section:"Operations"},
   {id:"club",label:"Club Membership",icon:"fa-users", req:"club", section:"Operations"},
   {id:"coaches",label:"Club Coaches",icon:"fa-user-tie", req:"coaches", section:"Operations"},
   {id:"supervisors",label:"Supervisors",icon:"fa-user-shield", req:"supervisors", section:"Operations"},
@@ -1884,7 +1890,8 @@ const NAV=[
   {id:"individualaccess",label:"Individual Access",icon:"fa-user-check", superAdminOnly:true, section:"System"},
   {id:"sectionmanager",label:"Custom Sections",icon:"fa-folder-plus", superAdminOnly:true, section:"System"},
   {id:"profile",label:"My Profile",icon:"fa-user-circle", always:true, section:"Account"},
-  {id:"settings",label:"Settings",icon:"fa-sliders-h", always:true, section:"Account"}
+  {id:"settings",label:"Settings",icon:"fa-sliders-h", always:true, section:"Account"},
+  {id:"privacy",label:"Privacy Center",icon:"fa-user-shield", always:true, section:"Account"}
 ];
 function buildNav(){
   const customNavItems = (DB.customSections||[]).map(cs => ({id:cs.id, label:cs.label, icon:cs.icon||"fa-folder", req:cs.id, section:"Operations"}));
@@ -2003,7 +2010,7 @@ function render(){
   }
 
   const map={dashboard:renderDash,marathon:renderMarathon,club:renderClub,coaches:renderCoaches,supervisors:renderSupervisors,gifts:renderGifts,products:renderProducts,quotations:renderQuotations,worldteam:()=>renderRankSection('worldteam'),getteam:()=>renderRankSection('getteam'),milteam:()=>renderRankSection('milteam'),presteam:()=>renderRankSection('presteam'),backup:renderBackup,admin:renderAdmin,permissions:renderPermissions,individualaccess:renderIndividualAccess,sectionmanager:renderSectionManager,profile:renderProfile,settings:renderSettings,privacy:renderPrivacyCenter};
-  const titles={dashboard:"Dashboard Overview",marathon:"Marathon Payments",club:"Club Membership",coaches:"Club Coaches",supervisors:"Supervisors",gifts:"Gifts & Rewards",products:"Products",quotations:"Quotations",worldteam:"World Team",getteam:"GET Team",milteam:"Millionaire Team",presteam:"President's Team",backup:"Data Management",admin:"User Management",permissions:"Access Control Manager",individualaccess:"Individual Access",sectionmanager:"Custom Sections",profile:"My Profile",settings:"Account Settings",privacy:"Privacy Center"};
+  const titles={dashboard:"Dashboard Overview",marathon:"Payments",club:"Club Membership",coaches:"Club Coaches",supervisors:"Supervisors",gifts:"Gifts & Rewards",products:"Products",quotations:"Quotations",worldteam:"World Team",getteam:"GET Team",milteam:"Millionaire Team",presteam:"President's Team",backup:"Data Management",admin:"User Management",permissions:"Access Control Manager",individualaccess:"Individual Access",sectionmanager:"Custom Sections",profile:"My Profile",settings:"Account Settings",privacy:"Privacy Center"};
   const translatedTitle = I18N.en[activePage] ? t(activePage) : (titles[activePage]||"Dashboard");
   topbar(translatedTitle);
   (map[activePage]||renderDash)();
@@ -2027,11 +2034,28 @@ window.quickToggleDark=()=>{
   p.theme = p.theme==='dark' ? 'light' : 'dark';
   applyTheme(); save(true); render();
 };
+// Quick Add. NOTE: closeModal() is asynchronous — it plays a ~150ms fade-out and only then
+// clears #modalRoot (immediately, if the user prefers reduced motion). Opening the next form in
+// the same tick (the old inline onclick handlers) meant the freshly opened
+// form was wiped by that pending clear, so the action buttons appeared to do nothing. Wait the
+// close out first (same approach as cancelClientModal), and re-check write permission at that
+// moment so this can never open a form the user isn't allowed to use.
+const QUICK_ADD_ACTIONS = {
+  member:     { section:'club',        open:()=>memberModal() },
+  coach:      { section:'coaches',     open:()=>coachModal() },
+  supervisor: { section:'supervisors', open:()=>supModal() }
+};
+window.quickAddGo=(kind)=>{
+  const action = Object.prototype.hasOwnProperty.call(QUICK_ADD_ACTIONS, kind) ? QUICK_ADD_ACTIONS[kind] : null;
+  if(!action || !canWrite(action.section)) return;
+  closeModal();
+  setTimeout(()=>{ if(canWrite(action.section)) action.open(); }, 200);
+};
 window.openQuickAddMenu=()=>{
   const options = [
-    canWrite('club') ? `<button class="btn btn-gray" style="width:100%;justify-content:flex-start;padding:14px;margin-bottom:8px" onclick="closeModal();memberModal()"><i class="fas fa-user" style="width:20px"></i> Add Member</button>` : '',
-    canWrite('coaches') ? `<button class="btn btn-gray" style="width:100%;justify-content:flex-start;padding:14px;margin-bottom:8px" onclick="closeModal();coachModal()"><i class="fas fa-user-tie" style="width:20px"></i> Add Coach</button>` : '',
-    canWrite('supervisors') ? `<button class="btn btn-gray" style="width:100%;justify-content:flex-start;padding:14px" onclick="closeModal();supModal()"><i class="fas fa-user-shield" style="width:20px"></i> Add Supervisor</button>` : ''
+    canWrite('club') ? `<button class="btn btn-gray" style="width:100%;justify-content:flex-start;padding:14px;margin-bottom:8px" onclick="quickAddGo('member')"><i class="fas fa-user" style="width:20px"></i> Add Member</button>` : '',
+    canWrite('coaches') ? `<button class="btn btn-gray" style="width:100%;justify-content:flex-start;padding:14px;margin-bottom:8px" onclick="quickAddGo('coach')"><i class="fas fa-user-tie" style="width:20px"></i> Add Coach</button>` : '',
+    canWrite('supervisors') ? `<button class="btn btn-gray" style="width:100%;justify-content:flex-start;padding:14px" onclick="quickAddGo('supervisor')"><i class="fas fa-user-shield" style="width:20px"></i> Add Supervisor</button>` : ''
   ].join('');
   showModal(`
     <div class="modal-head"><h3>Quick Add</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
@@ -2149,7 +2173,7 @@ function renderDash(){
       const rec = d.transactions.filter(t=>t.status==="completed" && t.type!=="sent").reduce((s,t)=>s+ Number(t.amount || 0),0);
       const sent = d.transactions.filter(t=>t.status==="completed" && t.type==="sent").reduce((s,t)=>s+ Number(t.amount || 0),0);
       const totalRev = rec - sent;
-      statsHtml += `<div class="stat"><div class="stat-ic ic-green"><i class="fas fa-wallet"></i></div><div class="stat-info"><div class="stat-val">${money(totalRev)}</div><div class="stat-lbl">Net Marathon Flow</div></div></div><div class="stat"><div class="stat-ic ic-blue"><i class="fas fa-running"></i></div><div class="stat-info"><div class="stat-val">${d.transactions.length}</div><div class="stat-lbl">Total Marathon Logs</div></div></div>`;
+      statsHtml += `<div class="stat"><div class="stat-ic ic-green"><i class="fas fa-wallet"></i></div><div class="stat-info"><div class="stat-val">${money(totalRev)}</div><div class="stat-lbl">Net Payment Flow</div></div></div><div class="stat"><div class="stat-ic ic-blue"><i class="fas fa-running"></i></div><div class="stat-info"><div class="stat-val">${d.transactions.length}</div><div class="stat-lbl">Total Payment Logs</div></div></div>`;
       hasStats = true;
   }
   if (canView('club')) {
@@ -2232,7 +2256,7 @@ function renderDash(){
     ${recentActs.length ? `<div style="display:flex;flex-direction:column;gap:2px">` + recentActs.map(a=>`
       <div style="display:flex;align-items:center;gap:12px;padding:10px 4px;border-bottom:1px solid var(--border)">
         <div style="width:32px;height:32px;border-radius:8px;background:var(--bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--primary)"><i class="fas ${esc(a.icon)}" style="font-size:.8rem"></i></div>
-        <div style="flex:1;min-width:0;font-size:.85rem"><b>${esc(a.user||'Someone')}</b> ${actionVerb[a.action]||a.action} ${a.label.toLowerCase()} <b>${esc(dispName(a.name))}</b></div>
+        <div style="flex:1;min-width:0;font-size:.85rem"><b>${esc(a.user||'Someone')}</b> ${actionVerb[a.action]||a.action} ${esc(String(a.label==='Marathon Payment'?'Payment':a.label).toLowerCase())} <b>${esc(dispName(a.name))}</b></div>
         <div style="font-size:.72rem;color:var(--text-muted);white-space:nowrap;flex-shrink:0">${timeAgo(a.ts)}</div>
       </div>`).join("") + `</div>`
       : `<div class="empty" style="padding:24px"><i class="fas fa-clock-rotate-left"></i>No activity recorded yet</div>`}
@@ -2246,10 +2270,36 @@ function renderDash(){
 let maraSearch="",marathonFilter="all";
 window.setMaraSearch=v=>{ maraSearch=v.toLowerCase(); renderMarathonResults(); };
 window.setMaraFilter=v=>{ marathonFilter=v; renderMarathonResults(); };
+// Four summary totals for the Payments page. Pure function of the transaction list it is given
+// (callers pass the already-authorized dataset, data().transactions). type==='sent' is debit;
+// anything else is credit. Only status 'completed' and 'pending' are counted, each in exactly
+// one bucket, so a pending item can never also land in a completed total.
+function computePaymentTotals(transactions){
+  const totals = { totalReceived:0, totalSent:0, pendingReceived:0, pendingSent:0 };
+  (Array.isArray(transactions) ? transactions : []).forEach(tx=>{
+    if(!tx) return;
+    const n = Number(tx.amount);
+    const amt = Number.isFinite(n) ? n : 0;
+    const sent = tx.type === 'sent';
+    if(tx.status === 'completed'){ if(sent) totals.totalSent += amt; else totals.totalReceived += amt; }
+    else if(tx.status === 'pending'){ if(sent) totals.pendingSent += amt; else totals.pendingReceived += amt; }
+  });
+  return totals;
+}
+function paymentTotalsHtml(transactions){
+  const T = computePaymentTotals(transactions);
+  const card = (icon, cls, val, lbl) => `<div class="stat"><div class="stat-ic ${cls}"><i class="fas ${icon}"></i></div><div class="stat-info"><div class="stat-val">${money(val)}</div><div class="stat-lbl">${lbl}</div></div></div>`;
+  return `<div class="stats" id="paymentTotals">`
+    + card('fa-arrow-down','ic-green',T.totalReceived,'Total Received')
+    + card('fa-arrow-up','ic-red',T.totalSent,'Total Sent')
+    + card('fa-hourglass-half','ic-amber',T.pendingReceived,'Pending Received')
+    + card('fa-hourglass-half','ic-blue',T.pendingSent,'Pending Sent')
+    + `</div>`;
+}
 function renderMarathon(){
   const writeBtn = canWrite('marathon') ? `<button class="btn btn-primary" onclick="txModal()"><i class="fas fa-plus"></i> ${t('logPayment')}</button>` : '';
 
-  $("pageBody").innerHTML=switcher()+`
+  $("pageBody").innerHTML=switcher()+paymentTotalsHtml(data().transactions)+`
     <div class="card">
       <div class="card-head"><span class="card-title">${t('transactionHistory')}</span>${writeBtn}</div>
       <div class="filter-row">
@@ -2276,7 +2326,7 @@ function renderMarathonResults(){
           <td data-label="Amount" style="font-weight:800;font-size:1.05rem;color:${tx.type==='sent'?'#dc2626':'#059669'}">${tx.type==='sent'?'-':'+'}${money(tx.amount)}</td>
           <td data-label="${t('status')}"><span class="badge ${tx.status==='completed'?'bg-gray':'bg-amber'}">${tx.status}</span></td>
           ${canWrite('marathon')?`<td data-label="${t('actions')}"><button class="btn btn-sm btn-gray" onclick='txModal(${sj(tx)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('transactions',${sj(tx.id)})"><i class="fas fa-trash"></i></button></td>`:''}
-        </tr>`).join("")+`</tbody></table>` : `<div class="empty"><i class="fas fa-running"></i>No marathon payments logged</div>`;
+        </tr>`).join("")+`</tbody></table>` : `<div class="empty"><i class="fas fa-running"></i>No payments logged</div>`;
 }
 /* ---- Client selector (Marathon Payment "Client" field) ----
    Backed by the real d.clients collection (not harvested from transaction text anymore).
@@ -2399,7 +2449,7 @@ window.openCreateClientFromCombo=(prefillName)=>{
 window.txModal=(t={})=>{
   txCurrentId=t.id||""; txCurrentDate=t.date||""; txOriginalCustomer=t.customer||"";
   showModal(`
-  <div class="modal-head"><h3>${t.id?"Edit":"Log"} Marathon Payment</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
+  <div class="modal-head"><h3>${t.id?"Edit":"Log"} Payment</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
   <div class="form-group"><label>Client</label>
     <div class="client-combo" id="clientCombo">
       <input id="f_cust" autocomplete="off" placeholder="Search or select a client" value="${esc(t.customer||"")}">
@@ -4008,7 +4058,7 @@ function renderBackup(){
       <div class="stats" style="margin-bottom:0;gap:20px">
         <div class="stat" style="flex-direction:column;text-align:center;padding:24px 16px"><div class="stat-ic ic-green" style="margin:0 auto 12px"><i class="fas fa-file-download"></i></div><div style="font-weight:800;font-size:1rem;margin-bottom:6px">System Backup</div><p style="font-size:.8rem;color:var(--text-muted);margin-bottom:16px;line-height:1.4">Download a complete snapshot of all settings and records.</p><button class="btn btn-primary" style="width:100%" onclick="exportJSON(this)">Export JSON</button></div>
         ${canWrite('backup')?`<div class="stat" style="flex-direction:column;text-align:center;padding:24px 16px"><div class="stat-ic ic-blue" style="margin:0 auto 12px"><i class="fas fa-file-upload"></i></div><div style="font-weight:800;font-size:1rem;margin-bottom:6px">System Restore</div><p style="font-size:.8rem;color:var(--text-muted);margin-bottom:16px;line-height:1.4">Merge an older JSON backup into the current live database.</p><input type="file" id="impFile" accept=".json" class="hidden" onchange="importJSON(event)"><button class="btn btn-blue" style="width:100%" onclick="document.getElementById('impFile').click()">Import JSON</button></div>`:''}
-        <div class="stat" style="flex-direction:column;text-align:center;padding:24px 16px"><div class="stat-ic ic-amber" style="margin:0 auto 12px"><i class="fas fa-file-csv"></i></div><div style="font-weight:800;font-size:1rem;margin-bottom:6px">Financial Report</div><p style="font-size:.8rem;color:var(--text-muted);margin-bottom:16px;line-height:1.4">Export your Marathon payments as a spreadsheet format.</p><button class="btn btn-amber" style="width:100%" onclick="exportCSV(this)">Export CSV</button></div>
+        <div class="stat" style="flex-direction:column;text-align:center;padding:24px 16px"><div class="stat-ic ic-amber" style="margin:0 auto 12px"><i class="fas fa-file-csv"></i></div><div style="font-weight:800;font-size:1rem;margin-bottom:6px">Financial Report</div><p style="font-size:.8rem;color:var(--text-muted);margin-bottom:16px;line-height:1.4">Export your payments as a spreadsheet format.</p><button class="btn btn-amber" style="width:100%" onclick="exportCSV(this)">Export CSV</button></div>
         ${canWrite('club')?`<div class="stat" style="flex-direction:column;text-align:center;padding:24px 16px"><div class="stat-ic ic-purple" style="margin:0 auto 12px"><i class="fas fa-file-excel"></i></div><div style="font-weight:800;font-size:1rem;margin-bottom:6px">Import Client Excel</div><p style="font-size:.8rem;color:var(--text-muted);margin-bottom:16px;line-height:1.4">Upload an Excel/CSV of clients. Existing members are detected by name or phone — you choose to override or add as new for each match.</p><input type="file" id="impExcelFile" accept=".xlsx,.xls,.csv" class="hidden" onchange="importExcel(event)"><button class="btn btn-purple" style="width:100%" onclick="document.getElementById('impExcelFile').click()">Import Excel/CSV</button></div>`:''}
       </div>
     </div>
@@ -4234,7 +4284,7 @@ window.promptNewRole = () => {
 
 const PERM_SECTIONS_BASE = () => [
     {id:'dashboard', name:'Dashboard', icon:'fa-chart-pie', desc:'View high-level analytics and reports'},
-    {id:'marathon', name:'Marathon Payments', icon:'fa-running', desc:'Track revenue, sent payments, and ledgers'},
+    {id:'marathon', name:'Payments', icon:'fa-running', desc:'Track revenue, sent payments, and ledgers'},
     {id:'club', name:'Club Membership', icon:'fa-users', desc:'Manage the main roster and kit progress'},
     {id:'coaches', name:'Club Coaches', icon:'fa-user-tie', desc:'Directory of active and inactive coaches'},
     {id:'supervisors', name:'Supervisors', icon:'fa-user-shield', desc:'Directory of team supervisors'},
@@ -4305,7 +4355,7 @@ window.updateIndivPerm = (section, level) => {
 };
 const INDIV_SECTIONS_BASE = () => [
     {id:'dashboard', name:'Dashboard', icon:'fa-chart-pie'},
-    {id:'marathon', name:'Marathon Payments', icon:'fa-running'},
+    {id:'marathon', name:'Payments', icon:'fa-running'},
     {id:'club', name:'Club Membership', icon:'fa-users'},
     {id:'coaches', name:'Club Coaches', icon:'fa-user-tie'},
     {id:'supervisors', name:'Supervisors', icon:'fa-user-shield'},
@@ -4832,6 +4882,23 @@ function renderPrivacyTabBody(){
   if(privacyTab === 'mydata' && privacyMyDataCache) renderMyDataPreview();
 }
 
+// Direct entry points to the four policies and the three privacy tools, so every one of them is
+// visible from the Privacy Center's first screen (the Policies tab still lists the same four).
+function privacyQuickLinksHtml(){
+  const policyBtns = Object.keys(POLICY_CONTENT).map(type=>{
+    const st = policyStatus(type);
+    return `<button class="btn btn-gray" style="width:100%;justify-content:space-between;padding:12px 14px" onclick="viewPolicy(${sj(type)})"><span><i class="fas fa-file-contract" style="width:20px"></i> ${esc(POLICY_CONTENT[type].title)}</span><span class="badge ${st.accepted?'bg-green':'bg-gray'}">${st.accepted?'Accepted':'Not yet accepted'}</span></button>`;
+  }).join("");
+  const toolBtns = [
+    { tab:'consent',  icon:'fa-toggle-on', label:'Consent & Preferences' },
+    { tab:'mydata',   icon:'fa-database',  label:'My Data' },
+    { tab:'requests', icon:'fa-inbox',     label:'My Requests' }
+  ].map(b=>`<button class="btn btn-gray" style="width:100%;justify-content:flex-start;padding:12px 14px" onclick="setPrivacyTab(${sj(b.tab)})"><i class="fas ${esc(b.icon)}" style="width:20px"></i> ${esc(b.label)}</button>`).join("");
+  return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-top:20px">
+    <div><div style="font-weight:800;font-size:.85rem;margin-bottom:8px">Policies</div><div style="display:flex;flex-direction:column;gap:8px">${policyBtns}</div></div>
+    <div><div style="font-weight:800;font-size:.85rem;margin-bottom:8px">Your privacy tools</div><div style="display:flex;flex-direction:column;gap:8px">${toolBtns}</div></div>
+  </div>`;
+}
 function privacyOverviewHtml(){
   return `
     <div class="card"><div class="card-head"><span class="card-title"><i class="fas fa-shield-alt" style="color:var(--primary);margin-right:8px"></i>Privacy Overview</span></div>
@@ -4842,7 +4909,9 @@ function privacyOverviewHtml(){
         <div class="set-row" style="flex-direction:column;align-items:flex-start;gap:6px"><b><i class="fas fa-share-alt" style="color:var(--primary)"></i> Sharing</b><span class="desc">Only with Firebase/Cloudflare, the infrastructure this app runs on</span></div>
         <div class="set-row" style="flex-direction:column;align-items:flex-start;gap:6px"><b><i class="fas fa-user-check" style="color:var(--primary)"></i> Your control</b><span class="desc">View, export, correct, or request deletion any time below</span></div>
       </div>
+      ${privacyQuickLinksHtml()}
       <p style="font-size:.78rem;color:var(--text-muted);margin-top:16px;line-height:1.5">This Privacy Center is built to support India's Digital Personal Data Protection (DPDP) framework as it comes into force. It reflects the technical controls in place today — it is not a legal guarantee, and it doesn't make any claim about litigation risk.</p>
+      <p style="font-size:.7rem;color:var(--text-muted);margin-top:10px">Build: ${esc(APP_BUILD)}</p>
     </div>`;
 }
 
