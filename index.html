@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <meta name="theme-color" content="#146356" />
-<meta name="app-build" content="2026-09-21-policy-gate-login" />
+<meta name="app-build" content="2026-09-22-reqstatus-locked-ui" />
 <title>MoneyMatrix - Enterprise Edition</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -641,7 +641,7 @@
 // Build marker: identifies which source a deployed copy was built from. Also present as
 // <meta name="app-build"> in <head> (readable via view-source / curl without logging in) and
 // shown at the bottom of the Privacy Center overview. Bump this string on each release.
-const APP_BUILD = "2026-09-21-policy-gate-login";
+const APP_BUILD = "2026-09-22-reqstatus-locked-ui";
 try{ console.info("MoneyMatrix build:", APP_BUILD); }catch(e){}
 // Firebase is loaded dynamically and wrapped in try/catch. A static `import` at the top of
 // a module throws synchronously if the CDN can't be reached (blocked network, offline, a
@@ -4758,6 +4758,13 @@ function privacyFailureText(e, what, mayHaveSucceeded, ctx){
   if(status === 403) return `You're not authorized to ${what}.`;
   // /privacy/policy/accept answers 400 when the version isn't in the server's published list.
   if(status === 400 && ctx === "policy") return `That policy version hasn't been published by an administrator yet, so it can't be accepted right now. Please ask an administrator to publish the current policy versions.`;
+  // /privacy/request/status answers 400 ONLY for a missing id (never reached from this UI — the
+  // dropdown always has a real request open) or an invalid status transition (isValidStatusTransition
+  // in cloudflare-worker/lib/privacy.js — e.g. the request is already in a terminal status, or was
+  // moved by another admin since this one opened it). updatePrivacyRequestStatus() re-fetches the
+  // authorized data on this specific error and reports the request's real current status instead of
+  // this generic line, so this text is only ever seen if that resync itself couldn't find a match.
+  if(status === 400 && ctx === "reqstatus") return `This request's status has changed since you opened it — please reload "My Requests" and try again if still appropriate.`;
   if(status === 400) return `The server rejected this request — please check what you entered and try again.`;
   if(e && e.name === "TypeError" && !status) return `Couldn't reach the server — check your connection and try again.`;
   return `Couldn't ${what} — try again.`;
@@ -5382,13 +5389,24 @@ window.openPrivacyRequestDetail = (id) => {
   if(!r) return;
   const u = DB.users.find(x=>x.id===r.uid);
   const options = ["requested","under_review","approved","rejected","completed","partially_completed"];
+  // Mirrors TERMINAL_STATUSES in cloudflare-worker/lib/privacy.js exactly. isValidStatusTransition
+  // there rejects EVERY call once a request is in one of these — including a same-status call
+  // that only changes adminNotes — so once terminal, this endpoint accepts no further writes to
+  // this request at all. The UI locks accordingly rather than letting the admin fill in a form
+  // whose Save can only ever come back 400.
+  const TERMINAL = ["completed","rejected","partially_completed"];
+  const locked = TERMINAL.includes(r.status);
+  const statusField = locked
+    ? `<select id="pra_status" disabled>${options.map(o=>`<option value="${esc(o)}" ${r.status===o?'selected':''}>${esc(o.replace(/_/g,' '))}</option>`).join("")}</select>
+       <p id="pra_locked_note" style="color:var(--danger);font-size:.8rem;font-weight:600;margin-top:6px"><i class="fas fa-lock"></i> This request is in a final status and cannot be changed.</p>`
+    : `<select id="pra_status">${options.map(o=>`<option value="${esc(o)}" ${r.status===o?'selected':''}>${esc(o.replace(/_/g,' '))}</option>`).join("")}</select>`;
   showModal(`<div class="modal-head"><h3>Privacy Request</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
     <div class="form-group"><label>From</label><input value="${esc(u?u.username:r.uid)}" disabled></div>
     <div class="form-group"><label>Category</label><input value="${esc(r.category)}" disabled></div>
     <div class="form-group"><label>Description</label><textarea disabled>${esc(r.description||"")}</textarea></div>
-    <div class="form-group"><label>Status</label><select id="pra_status">${options.map(o=>`<option value="${esc(o)}" ${r.status===o?'selected':''}>${esc(o.replace(/_/g,' '))}</option>`).join("")}</select></div>
-    <div class="form-group"><label>Admin Notes</label><textarea id="pra_notes" maxlength="4000">${esc(r.adminNotes||"")}</textarea></div>
-    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Close</button><button class="btn btn-primary" onclick="updatePrivacyRequestStatus(${sj(id)}, this)"><i class="fas fa-check"></i> Save</button></div>`);
+    <div class="form-group"><label>Status</label>${statusField}</div>
+    <div class="form-group"><label>Admin Notes</label><textarea id="pra_notes" maxlength="4000" ${locked?'disabled':''}>${esc(r.adminNotes||"")}</textarea></div>
+    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Close</button>${locked?'':`<button class="btn btn-primary" onclick="updatePrivacyRequestStatus(${sj(id)}, this)"><i class="fas fa-check"></i> Save</button>`}</div>`);
 };
 window.updatePrivacyRequestStatus = async (id, btnEl) => {
   const status = $("pra_status").value;
@@ -5402,14 +5420,38 @@ window.updatePrivacyRequestStatus = async (id, btnEl) => {
     return;
   }
   try{
-    const resp = await callWorkerApi("/privacy/request/status", { requestId: id, status, adminNotes });
+    const resp = await callWorkerApi("/privacy/request/status", { requestId: id, status, adminNotes }, typeof PRIVACY_CALL_OPTS !== "undefined" ? PRIVACY_CALL_OPTS : undefined);
+    if(!resp || !resp.data || !resp.data.request) throw new Error("Unexpected status-update response");
     const idx = (DB.privacyRequests||[]).findIndex(x=>x.id===id);
     if(idx>-1) DB.privacyRequests[idx] = resp.data.request;
     handle.success("Saved");
     closeModal(); renderPrivacyTabBody(); toast("Request updated");
   }catch(e){
     handle.error("Failed");
-    toast("Couldn't update request — try again");
+    let msg = typeof privacyFailureText === "function" ? privacyFailureText(e, "update the request", true, "reqstatus") : "Couldn't update request — try again";
+    // A 400 here (see privacyFailureText's "reqstatus" branch) can only mean this specific
+    // request already moved to a different status server-side since the admin opened it —
+    // isValidStatusTransition in cloudflare-worker/lib/privacy.js is the only source of a 400
+    // from this endpoint once requestId is present, which it always is here. Re-pull the same
+    // admin-authorized data the normal cloud sync already uses (getAppDataFn -> /data/get) and
+    // patch ONLY this one row locally — never fabricate a status, and never route this through
+    // applyRemoteJson()/fetchAuthorizedData(), since both defer to isModalOpen()/isDirty guards
+    // built for a different purpose and would silently no-op while this modal is open.
+    if(e && e.status === 400 && typeof getAppDataFn === "function"){
+      try{
+        const fresh = await getAppDataFn();
+        const freshDB = JSON.parse(fresh.data.json);
+        const match = (freshDB.privacyRequests || []).find(x=>x.id===id);
+        if(match){
+          const idx2 = (DB.privacyRequests||[]).findIndex(x=>x.id===id);
+          if(idx2>-1) DB.privacyRequests[idx2] = match; else DB.privacyRequests = [match, ...(DB.privacyRequests||[])];
+          msg = `This request's status changed since you opened it — it's now "${match.status.replace(/_/g,' ')}". The list has been refreshed.`;
+        }
+      }catch(e2){ /* best-effort resync only; the generic message above still tells the admin to reload */ }
+      closeModal();
+      renderPrivacyTabBody();
+    }
+    toast(msg);
   }
 };
 window.publishCurrentPolicyVersions = async (btnEl) => {
