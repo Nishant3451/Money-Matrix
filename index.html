@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <meta name="theme-color" content="#146356" />
-<meta name="app-build" content="2026-09-21-privacy-nav+payments+quickadd" />
+<meta name="app-build" content="2026-09-21-policy-gate-login" />
 <title>MoneyMatrix - Enterprise Edition</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -345,6 +345,15 @@
   .login-brand-points li i{color:#F3D28C;font-size:.78rem}
   .login-form-panel{flex:1;background:var(--surface);padding:46px 40px;display:flex;align-items:center;min-width:280px}
   .login-form-inner{width:100%}
+  .login-policies{margin-top:22px;padding-top:16px;border-top:1px solid var(--border);text-align:left}
+  .login-policies .lp-title{font-weight:800;font-size:.85rem;margin-bottom:6px}
+  .login-policies p{font-size:.76rem;color:var(--text-muted);line-height:1.5;margin-bottom:10px}
+  .login-policies .lp-links{display:flex;flex-direction:column;gap:6px}
+  .login-policies .lp-link{display:flex;justify-content:space-between;align-items:center;width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface);color:var(--text);font-size:.82rem;font-weight:600;cursor:pointer;text-align:left}
+  .login-policies .lp-link span:last-child{color:var(--text-muted);font-weight:500}
+  .policy-gate{position:fixed;inset:0;z-index:900;background:var(--bg);overflow-y:auto;padding:20px;display:flex;align-items:flex-start;justify-content:center}
+  .policy-gate-card{width:100%;max-width:560px;margin:auto;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg,14px);padding:22px}
+  .policy-gate-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-top:1px solid var(--border)}
   .login-q{text-transform:uppercase;font-weight:700;letter-spacing:1.1px;font-size:.66rem;color:var(--text-muted);margin-bottom:7px}
   .login-welcome{font-family:var(--font-display);font-size:1.55rem;font-weight:700;margin-bottom:26px;letter-spacing:-.4px}
 
@@ -576,6 +585,7 @@
              server-verified implementation replaces it. -->
         <button class="login-btn hidden" id="biometricLoginBtn" onclick="tryBiometricLogin()" style="background:var(--surface);color:var(--primary);border:1px solid var(--border);margin-top:10px"><i class="fas fa-fingerprint" style="margin-right:6px"></i> Unlock with Fingerprint</button>
         <div id="loginErr" style="color:#DC2626;text-align:center;margin-top:12px;font-size:.85rem;font-weight:600"></div>
+        <div id="loginPolicies" class="login-policies"></div>
       </div>
     </div>
   </div>
@@ -631,7 +641,7 @@
 // Build marker: identifies which source a deployed copy was built from. Also present as
 // <meta name="app-build"> in <head> (readable via view-source / curl without logging in) and
 // shown at the bottom of the Privacy Center overview. Bump this string on each release.
-const APP_BUILD = "2026-09-21-privacy-nav+payments+quickadd";
+const APP_BUILD = "2026-09-21-policy-gate-login";
 try{ console.info("MoneyMatrix build:", APP_BUILD); }catch(e){}
 // Firebase is loaded dynamically and wrapped in try/catch. A static `import` at the top of
 // a module throws synchronously if the CDN can't be reached (blocked network, offline, a
@@ -707,15 +717,29 @@ const LOGIN_ENDPOINT = "https://moneymatrix-login.moneymatrix-login.workers.dev"
 // "functions/permission-denied", so that convention is preserved rather than changed)  — but
 // authenticated with a Firebase ID token in an Authorization header instead of Cloud
 // Functions' built-in callable auth context, since a Cloudflare Worker has no such thing.
-async function callWorkerApi(path, body) {
+// Optional third argument { timeoutMs }: abort the HTTP request after that long. Only the
+// Privacy Center passes it (see PRIVACY_API_TIMEOUT_MS) so a hung request can't leave a button
+// stuck on "Loading…" forever; every other caller is unchanged (no timeout, as before).
+async function callWorkerApi(path, body, opts) {
   if (!auth || !auth.currentUser) {
     throw Object.assign(new Error("Not signed in"), { code: "functions/unauthenticated" });
   }
-  const doFetch = async (idToken) => fetch(`${LOGIN_ENDPOINT}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${idToken}` },
-    body: JSON.stringify(body || {})
-  });
+  const timeoutMs = opts && opts.timeoutMs > 0 ? opts.timeoutMs : 0;
+  const doFetch = async (idToken) => {
+    const ctl = timeoutMs && typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = ctl ? setTimeout(() => ctl.abort(), timeoutMs) : null;
+    try {
+      return await fetch(`${LOGIN_ENDPOINT}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${idToken}` },
+        body: JSON.stringify(body || {}),
+        ...(ctl ? { signal: ctl.signal } : {})
+      });
+    } catch (e) {
+      if (ctl && ctl.signal.aborted) throw Object.assign(new Error("Request timed out"), { code: "functions/deadline-exceeded" });
+      throw e;
+    } finally { if (timer) clearTimeout(timer); }
+  };
   let resp = await doFetch(await auth.currentUser.getIdToken());
   if (resp.status === 401) {
     // The token may simply be stale (e.g. claims changed since it was minted) — force a real
@@ -727,10 +751,15 @@ async function callWorkerApi(path, body) {
     throw Object.assign(new Error("Session expired"), { code: "functions/unauthenticated" });
   }
   if (resp.status === 403) {
-    throw Object.assign(new Error("Not authorized"), { code: "functions/permission-denied" });
+    throw Object.assign(new Error("Not authorized"), { code: "functions/permission-denied", status: 403 });
+  }
+  if (resp.status === 429) {
+    // The Worker's privacy rate limits answer 429. This used to fall into the generic branch
+    // below, so the "Too many" check in submitPrivacyRequest() could never match.
+    throw Object.assign(new Error("Too many requests"), { code: "functions/resource-exhausted", status: 429 });
   }
   if (!resp.ok) {
-    throw Object.assign(new Error("Request failed"), { code: "functions/internal" });
+    throw Object.assign(new Error("Request failed"), { code: "functions/internal", status: resp.status });
   }
   return resp.json();
 }
@@ -1030,6 +1059,10 @@ function reconcileMemberSupervisors(){
   return changed;
 }
 
+// True once THIS page load has applied a server-authorized view (which carries the caller's own
+// policyAcceptances and the published policyVersions). The post-login policy gate only decides
+// anything after that, so a stale local cache can never wrongly prompt an already-accepted user.
+let serverViewReceived = false;
 let cloudSyncStarted = false;
 function startCloud(){
   if(!firebaseAvailable){ setSync(typeof isLocalFileTest !== "undefined" && isLocalFileTest ? "Local file test — cloud sync disabled" : "Local mode — no cloud sync",true); return; }
@@ -1062,7 +1095,7 @@ async function fetchAuthorizedData(){
     const result = await getAppDataFn();
     const newJson = result.data.json;
     setSync("✓ Data Synchronized");
-    if(newJson === lastCloudJson) return;
+    if(newJson === lastCloudJson){ serverViewReceived = true; enforcePolicyGate(); return; }
     if(isDirty){
       // We have local edits pending. Only safe to treat our local copy as still current if
       // nothing else has changed since we last synced — otherwise we'd risk pushing stale
@@ -1096,7 +1129,9 @@ function applyRemoteJson(newJson){
   // against next time, so a stale leftover local edit can't blindly overwrite newer data.
   localStorage.setItem("mm_last_base_json", newJson);
   applyingRemote = false;
+  serverViewReceived = true;
   if(currentUser) render();
+  enforcePolicyGate();
 }
 function isModalOpen(){
   const el = $("modalRoot");
@@ -1665,6 +1700,7 @@ function completeLogin(user){
   buildNav(); render();
   handleShortcutAction();
   startSessionWatcher();
+  enforcePolicyGate();
 }
 function isSessionExpired(){
   // The 2-hour timeout applies no matter what — "Remember me" only pre-fills the login
@@ -4705,6 +4741,34 @@ window.changePin=async ()=>{
    changes), update the relevant POLICY_CONTENT body directly and bump that policy's version
    constant so users are prompted to re-accept — do not silently edit accepted policy text.
 */
+// Privacy Center network calls give up after this long (see callWorkerApi's opts.timeoutMs).
+const PRIVACY_API_TIMEOUT_MS = 30000;
+const PRIVACY_CALL_OPTS = { timeoutMs: PRIVACY_API_TIMEOUT_MS };
+
+// Turns a failed Privacy Center call into ONE clear sentence for the user. Text is authored
+// here from the HTTP status only — server-supplied text is never shown — so nothing
+// attacker-controlled can reach the DOM through it. `what` is a short verb phrase.
+function privacyFailureText(e, what, mayHaveSucceeded, ctx){
+  const status = e && e.status;
+  if(e && e.code === "functions/deadline-exceeded")
+    return `The server took too long to respond.${mayHaveSucceeded ? " Check \"My Requests\" before trying again — it may have gone through." : " Please try again."}`;
+  if(status === 429) return `You've reached the limit for this action for now — please wait a while and try again.`;
+  if(status === 503) return `This service is temporarily unavailable — please try again shortly.`;
+  if(status === 409) return `Your change conflicted with another update — please try again.`;
+  if(status === 403) return `You're not authorized to ${what}.`;
+  // /privacy/policy/accept answers 400 when the version isn't in the server's published list.
+  if(status === 400 && ctx === "policy") return `That policy version hasn't been published by an administrator yet, so it can't be accepted right now. Please ask an administrator to publish the current policy versions.`;
+  if(status === 400) return `The server rejected this request — please check what you entered and try again.`;
+  if(e && e.name === "TypeError" && !status) return `Couldn't reach the server — check your connection and try again.`;
+  return `Couldn't ${what} — try again.`;
+}
+// Persistent inline feedback (a toast alone disappears in ~2s and is easy to miss).
+function showPrivacyStatus(id, msg, isError){
+  const el = $(id); if(!el) return;
+  el.textContent = msg || "";
+  el.style.display = msg ? "block" : "none";
+  el.style.color = isError ? "var(--danger)" : "var(--primary)";
+}
 const PRIVACY_POLICY_VERSION = "1.3";
 const TERMS_VERSION = "1.1";
 const COOKIE_POLICY_VERSION = "1.2";
@@ -4873,7 +4937,12 @@ function renderPrivacyCenter(){
     <div id="privacyTabBody"></div>`;
   renderPrivacyTabBody();
 }
-window.setPrivacyTab = (id) => { privacyTab = id; renderPrivacyCenter(); };
+window.setPrivacyTab = (id) => {
+  privacyTab = id; renderPrivacyCenter();
+  // The quick-link buttons sit low on the Overview; without this the new tab's content can
+  // render out of view and the click looks like it did nothing.
+  const top = $("pageBody"); if(top && typeof top.scrollIntoView === "function") top.scrollIntoView({ block: "start" });
+};
 function renderPrivacyTabBody(){
   const el = $("privacyTabBody");
   if(!el) return;
@@ -4921,48 +4990,151 @@ function privacyPoliciesHtml(){
     return `<tr>
       <td data-label="Policy"><b>${esc(POLICY_CONTENT[type].title)}</b></td>
       <td data-label="Version">v${esc(st.version)}</td>
-      <td data-label="Your Status">${st.accepted ? `<span class="badge bg-green"><i class="fas fa-check"></i> Accepted</span>` : `<span class="badge bg-gray">Not yet accepted</span>`}</td>
+      <td data-label="Your Status">${st.accepted ? `<span class="badge bg-green"><i class="fas fa-check"></i> Accepted</span>` : !isPolicyPublished(type) ? `<span class="badge bg-gray">Awaiting publication</span>` : `<span class="badge bg-gray">Not yet accepted</span>`}</td>
       <td data-label="Actions"><button class="btn btn-sm btn-blue" onclick="viewPolicy(${sj(type)})"><i class="fas fa-eye"></i> Read</button></td>
     </tr>`;
   }).join("");
+  const unpublished = Object.keys(POLICY_CONTENT).filter(type => !isPolicyPublished(type));
+  const pubNote = !unpublished.length ? "" : isAdmin()
+    ? `<div class="set-row" style="margin-bottom:10px"><div><b>${unpublished.length} current polic${unpublished.length===1?"y version is":"y versions are"} not published yet</b><div class="desc">Users can't accept a version until it is published. Publishing records the versions already in this app; it doesn't change any policy text.</div></div><button class="btn btn-sm btn-primary" onclick="publishCurrentPolicyVersions(this)"><i class="fas fa-upload"></i> Publish Current Code Versions</button></div>`
+    : `<p style="font-size:.8rem;color:var(--text-muted);margin-bottom:10px;line-height:1.5">${unpublished.length} current polic${unpublished.length===1?"y version is":"y versions are"} awaiting publication by an administrator; those can't be accepted yet.</p>`;
   return `<div class="card"><div class="card-head"><span class="card-title">Policies</span></div>
+    ${pubNote}
     <div class="tbl-wrap"><table><thead><tr><th>Policy</th><th>Version</th><th>Your Status</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>
   </div>`;
+}
+// A policy version can only be accepted once an administrator has PUBLISHED it on the server
+// (Worker /privacy/policy/accept refuses anything not in policyVersions with status "published").
+// DB.policyVersions is what the server told this client, so it's the right thing to check.
+function isPolicyPublished(type){
+  const v = POLICY_CONTENT[type] && POLICY_CONTENT[type].version;
+  return (DB.policyVersions || []).some(p => p && p.type === type && p.version === v && p.status === "published");
+}
+// Types whose CURRENT version is published but not yet accepted by this user (a newer version
+// than the one they accepted counts as not accepted).
+function policiesNeedingAcceptance(){
+  if(!currentUser) return [];
+  return Object.keys(POLICY_CONTENT).filter(type => isPolicyPublished(type) && !policyStatus(type).accepted);
 }
 window.viewPolicy = (type) => {
   const policy = POLICY_CONTENT[type];
   if(!policy) return;
-  const st = policyStatus(type);
+  // Reused on the login page too, where nobody is signed in: read-only, no acceptance there
+  // (acceptance is only ever recorded for an authenticated identity — see acceptPolicy()).
+  const signedIn = !!currentUser;
+  const st = signedIn ? policyStatus(type) : null;
+  let action;
+  if(!signedIn) action = `<span style="font-size:.8rem;color:var(--text-muted);align-self:center">Sign in to review and accept this version.</span>`;
+  else if(st.accepted) action = `<button class="btn btn-primary" disabled><i class="fas fa-check"></i> Already accepted (v${esc(st.acceptedVersion)})</button>`;
+  else if(!isPolicyPublished(type)) action = `<span style="font-size:.8rem;color:var(--text-muted);align-self:center">This version hasn't been published by an administrator yet, so it can't be accepted right now.</span>`;
+  else action = `<button class="btn btn-primary" onclick="acceptPolicy(${sj(type)}, this)"><i class="fas fa-check"></i> I Accept This Version</button>`;
   showModal(`<div class="modal-head"><h3>${esc(policy.title)} <span style="font-size:.75rem;color:var(--text-muted)">v${esc(policy.version)}</span></h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
     <div style="max-height:55vh;overflow:auto;white-space:pre-wrap;font-size:.85rem;line-height:1.6;padding-right:6px">${esc(policy.body)}</div>
     <div class="modal-btns">
       <button class="btn btn-gray" onclick="closeModal()">Close</button>
-      ${st.accepted ? `<button class="btn btn-primary" disabled><i class="fas fa-check"></i> Already accepted (v${esc(st.acceptedVersion)})</button>` : `<button class="btn btn-primary" onclick="acceptPolicy(${sj(type)}, this)"><i class="fas fa-check"></i> I Accept This Version</button>`}
+      ${action}
     </div>`);
 };
-window.acceptPolicy = async (type, btnEl) => {
+// Records acceptance of the CURRENT code version of one policy. Identity is never sent: the
+// Worker derives the uid from the verified Firebase ID token. Local state is only written AFTER
+// the Worker confirms ({data:{ok:true}}). Returns true/false. opts.quiet skips modal/toast/rerender
+// (used by the gate's "accept all", which re-renders once at the end).
+window.acceptPolicy = async (type, btnEl, opts) => {
   const policy = POLICY_CONTENT[type];
+  const quiet = !!(opts && opts.quiet);
   const handle = mmBtnBusy(btnEl, "Recording…");
   if(!firebaseAvailable){
     // HARDENING CORRECTION: privacy/security-sensitive operations must never be represented as
     // submitted/recorded just because a local object was written to DB — see
     // PART-B-HARDENING-REPORT.md section on offline privacy operations. There is no server to
     // record this acceptance against in this mode, so it is refused, not faked.
-    handle.error("Unavailable offline");
+    if(handle) handle.error("Unavailable offline");
     toast("Privacy action unavailable offline — please reconnect and try again.");
-    return;
+    return false;
   }
   try{
-    await callWorkerApi("/privacy/policy/accept", { policyType: type, version: policy.version });
+    const resp = await callWorkerApi("/privacy/policy/accept", { policyType: type, version: policy.version }, typeof PRIVACY_CALL_OPTS !== "undefined" ? PRIVACY_CALL_OPTS : undefined);
+    if(!resp || !resp.data || resp.data.ok !== true) throw new Error("Unexpected acceptance response");
     DB.policyAcceptances = DB.policyAcceptances || {};
     DB.policyAcceptances[currentUser.id] = DB.policyAcceptances[currentUser.id] || {};
     DB.policyAcceptances[currentUser.id][type] = { version: policy.version, timestamp: Date.now() };
-    handle.success("Recorded");
-    closeModal(); renderPrivacyCenter(); toast(`${policy.title} accepted`);
+    if(handle) handle.success("Recorded");
+    if(!quiet){
+      closeModal();
+      if(typeof afterPolicyAccepted === "function") afterPolicyAccepted(); else renderPrivacyCenter();
+      toast(`${policy.title} accepted`);
+    }
+    return true;
   }catch(e){
-    handle.error("Failed");
-    toast("Couldn't record acceptance — try again");
+    if(handle) handle.error("Failed");
+    const msg = typeof privacyFailureText === "function" ? privacyFailureText(e, "record your acceptance", true, "policy") : "Couldn't record acceptance — try again";
+    toast(msg);
+    if(typeof showPolicyGateError === "function") showPolicyGateError(msg);
+    return false;
   }
+};
+function afterPolicyAccepted(){
+  if(activePage === "privacy" && $("pageBody")) renderPrivacyCenter();
+  enforcePolicyGate();
+}
+
+// ---- Login page: "Policies & Terms" (read-only; signing in accepts nothing) ----
+function renderLoginPolicies(){
+  const el = $("loginPolicies"); if(!el) return;
+  el.innerHTML = `<div class="lp-title">Policies &amp; Terms</div>
+    <p>Signing in does not accept anything by itself. After you sign in, you'll be asked to review and accept the current version of each published policy (once per version). You can read them now:</p>
+    <div class="lp-links">${Object.keys(POLICY_CONTENT).map(type=>`<button type="button" class="lp-link" onclick="viewPolicy(${sj(type)})"><span>${esc(POLICY_CONTENT[type].title)}</span><span>v${esc(POLICY_CONTENT[type].version)}</span></button>`).join("")}</div>`;
+}
+
+// ---- Post-authentication policy gate ----
+// Shown only for an authenticated user (Firebase session established) once the server's own view
+// has been applied, and only for policy versions an administrator has published. It never
+// pre-accepts anything: each acceptance is a /privacy/policy/accept call whose success the
+// Worker confirms. Note this is a client-side gate (the Worker does not refuse data reads over
+// missing acceptance); what the server guarantees is that the acceptance record is genuine.
+window.showPolicyGateError = (msg) => { const el = $("pgError"); if(el){ el.textContent = msg || ""; el.style.display = msg ? "block" : "none"; } };
+function enforcePolicyGate(){
+  const gate = $("policyGate");
+  const missing = (firebaseAvailable && currentUser && serverViewReceived) ? policiesNeedingAcceptance() : [];
+  if(!missing.length){ if(gate) gate.remove(); return; }
+  const agreed = !!($("pgAgree") && $("pgAgree").checked);
+  const prevErr = ($("pgError") && $("pgError").textContent) || "";
+  const el = gate || Object.assign(document.createElement("div"), { id: "policyGate", className: "policy-gate" });
+  el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true"); el.setAttribute("aria-label", "Review and accept policies");
+  const mine = (DB.policyAcceptances && DB.policyAcceptances[currentUser.id]) || {};
+  const rows = Object.keys(POLICY_CONTENT).map(type => {
+    const pol = POLICY_CONTENT[type], st = policyStatus(type), pub = isPolicyPublished(type);
+    const badge = st.accepted ? `<span class="badge bg-green"><i class="fas fa-check"></i> Accepted</span>`
+      : !pub ? `<span class="badge bg-gray">Not published yet</span>`
+      : mine[type] ? `<span class="badge bg-orange">Updated — you accepted v${esc(mine[type].version)}</span>`
+      : `<span class="badge bg-orange">Needs acceptance</span>`;
+    return `<div class="policy-gate-row"><div><b>${esc(pol.title)}</b> <span style="font-size:.75rem;color:var(--text-muted)">v${esc(pol.version)}</span><div style="margin-top:4px">${badge}</div></div><button class="btn btn-sm btn-blue" onclick="viewPolicy(${sj(type)})"><i class="fas fa-eye"></i> Read</button></div>`;
+  }).join("");
+  el.innerHTML = `<div class="policy-gate-card">
+      <h2 style="font-family:var(--font-display);font-size:1.25rem;margin-bottom:6px">Review &amp; accept our policies</h2>
+      <p style="font-size:.85rem;color:var(--text-muted);line-height:1.5;margin-bottom:12px">Before you continue, please read and accept the current version of each policy marked <b>Needs acceptance</b> or <b>Updated</b>. This is an acknowledgement of the policies only — it is separate from optional processing consent, and this app currently has no optional consent categories.</p>
+      ${rows}
+      <label style="display:flex;gap:8px;align-items:flex-start;margin-top:14px;font-size:.85rem;text-transform:none;font-weight:600;cursor:pointer"><input type="checkbox" id="pgAgree" ${agreed?"checked":""} style="margin-top:3px"> <span>I have read and accept the current version of ${missing.length === 1 ? "the policy" : `the ${missing.length} policies`} marked above as needing acceptance.</span></label>
+      <div id="pgError" role="alert" style="display:${prevErr?"block":"none"};color:var(--danger);font-size:.85rem;font-weight:600;margin-top:10px">${esc(prevErr)}</div>
+      <button class="btn btn-primary" id="pgAcceptBtn" style="width:100%;margin-top:14px" onclick="acceptAllPolicies(this)"><i class="fas fa-check"></i> Accept &amp; continue</button>
+      <button class="btn btn-gray" style="width:100%;margin-top:8px" onclick="go('logout')"><i class="fas fa-sign-out-alt"></i> Sign out</button>
+    </div>`;
+  if(!gate) document.body.appendChild(el);
+}
+window.enforcePolicyGate = enforcePolicyGate; // exposed so other code paths (and tests) can re-evaluate the gate on demand
+window.acceptAllPolicies = async (btnEl) => {
+  if(!($("pgAgree") && $("pgAgree").checked)){ showPolicyGateError("Please tick the box to confirm you have read and accept the policies."); return; }
+  showPolicyGateError("");
+  const handle = mmBtnBusy(btnEl, "Recording…");
+  let allOk = true;
+  for(const type of policiesNeedingAcceptance()){
+    const ok = await window.acceptPolicy(type, null, { quiet: true });
+    if(!ok){ allOk = false; break; }
+  }
+  if(handle) allOk ? handle.success("Recorded") : handle.error("Failed");
+  const lastErr = $("pgError") && $("pgError").textContent;
+  enforcePolicyGate();   // removes the gate only if nothing is left to accept
+  if(!allOk && $("policyGate") && !$("pgError").textContent) showPolicyGateError(lastErr || "Couldn't record your acceptance — please try again.");
 };
 
 function privacyConsentHtml(){
@@ -5004,7 +5176,9 @@ async function fetchMyDataExport(){
       ownRecords: (DB.perUser && DB.perUser[currentUser.id]) || null,
     };
   }
-  const resp = await callWorkerApi("/privacy/export", {});
+  const resp = await callWorkerApi("/privacy/export", {}, PRIVACY_CALL_OPTS);
+  // Never report "Loaded" for a response that has no export in it (that rendered nothing at all).
+  if(!resp || !resp.data || typeof resp.data.export !== "object" || !resp.data.export) throw new Error("Unexpected export response");
   return resp.data.export;
 }
 
@@ -5013,18 +5187,23 @@ function privacyMyDataHtml(){
     <div class="card"><div class="card-head"><span class="card-title">My Data</span></div>
       <p style="font-size:.85rem;color:var(--text-muted);line-height:1.5;margin-bottom:12px">Load a snapshot of the personal/account data linked to your login, then export it as JSON or CSV.</p>
       <button class="btn btn-primary" id="myDataLoadBtn" onclick="loadMyData(this)"><i class="fas fa-sync"></i> ${privacyMyDataCache ? 'Refresh My Data' : 'Load My Data'}</button>
+      <div id="myDataStatus" role="status" aria-live="polite" style="display:none;margin-top:12px;font-size:.85rem;font-weight:600"></div>
+      ${privacyMyDataCache ? '' : `<p style="font-size:.78rem;color:var(--text-muted);margin-top:12px;line-height:1.5">Nothing is loaded yet — press <b>Load My Data</b> to fetch your snapshot. Loading is rate-limited, so it isn't done automatically.</p>`}
       <div id="myDataPreview" style="margin-top:16px"></div>
     </div>`;
 }
 window.loadMyData = async (btnEl) => {
   const handle = btnEl ? mmBtnBusy(btnEl, "Loading…") : null;
+  showPrivacyStatus("myDataStatus", "");
   try{
     privacyMyDataCache = await fetchMyDataExport();
     if(handle) handle.success("Loaded");
     renderMyDataPreview();
   }catch(e){
     if(handle) handle.error("Failed");
-    toast("Couldn't load your data — try again");
+    const msg = privacyFailureText(e, "load your data");
+    showPrivacyStatus("myDataStatus", msg, true);
+    toast(msg);
   }
 };
 function renderMyDataPreview(){
@@ -5085,7 +5264,7 @@ function rowsToCsv(rows, columns, sectionTitle){
 }
 
 function privacyRequestsHtml(){
-  const mine = (DB.privacyRequests || []).filter(r=>r.uid===currentUser.id).sort((a,b)=>b.submittedAt-a.submittedAt);
+  const mine = (DB.privacyRequests || []).filter(r=>r && r.uid===currentUser.id).sort((a,b)=>(+b.submittedAt||0)-(+a.submittedAt||0));
   const statusBadge = s => ({requested:'bg-gray',under_review:'bg-blue',approved:'bg-blue',completed:'bg-green',rejected:'bg-red',partially_completed:'bg-orange'}[s] || 'bg-gray');
   return `
     <div class="card"><div class="card-head"><span class="card-title">Submit a Request</span></div>
@@ -5099,13 +5278,14 @@ function privacyRequestsHtml(){
       </select></div>
       <div class="form-group"><label>Description</label><textarea id="pr_desc" placeholder="Explain what you'd like — the more detail, the faster we can help" maxlength="4000"></textarea></div>
       <button class="btn btn-primary" style="width:100%" onclick="submitPrivacyRequest(this)"><i class="fas fa-paper-plane"></i> Submit Request</button>
+      <div id="pr_status" role="status" aria-live="polite" style="display:none;margin-top:12px;font-size:.85rem;font-weight:600"></div>
       <hr style="margin:18px 0;border:none;border-top:1px solid var(--border)">
       <button class="btn btn-red" style="width:100%" onclick="requestDeletion()"><i class="fas fa-trash-alt"></i> Request Account Deletion</button>
       <p style="font-size:.75rem;color:var(--text-muted);margin-top:8px;line-height:1.4">Deletion is reviewed, not instant — submitting this creates a tracked request; it does not delete anything by itself.</p>
     </div>
     <div class="card"><div class="card-head"><span class="card-title">My Requests</span></div>
       ${mine.length ? `<div class="tbl-wrap"><table><thead><tr><th>Category</th><th>Status</th><th>Submitted</th><th>Notes</th></tr></thead><tbody>${
-        mine.map(r=>`<tr><td data-label="Category">${esc(r.category)}</td><td data-label="Status"><span class="badge ${statusBadge(r.status)}">${esc(r.status.replace(/_/g,' '))}</span></td><td data-label="Submitted">${new Date(r.submittedAt).toLocaleDateString()}</td><td data-label="Notes">${esc(r.adminNotes||"—")}</td></tr>`).join("")
+        mine.map(r=>`<tr><td data-label="Category">${esc(r.category)}</td><td data-label="Status"><span class="badge ${statusBadge(r.status)}">${esc(String(r.status||"requested").replace(/_/g,' '))}</span></td><td data-label="Submitted">${new Date(r.submittedAt).toLocaleDateString()}</td><td data-label="Notes">${esc(r.adminNotes||"—")}</td></tr>`).join("")
       }</tbody></table></div>` : `<div class="empty"><i class="fas fa-inbox"></i>No requests submitted yet</div>`}
     </div>`;
 }
@@ -5121,16 +5301,22 @@ window.submitPrivacyRequest = async (btnEl) => {
     toast("Privacy action unavailable offline — please reconnect and try again.");
     return;
   }
+  if(typeof showPrivacyStatus === "function") showPrivacyStatus("pr_status", "");
   try{
-    const resp = await callWorkerApi("/privacy/request", { category, description });
+    const resp = await callWorkerApi("/privacy/request", { category, description }, typeof PRIVACY_CALL_OPTS !== "undefined" ? PRIVACY_CALL_OPTS : undefined);
+    // Only ever store the server's own record; a 200 without one is a failure, not a success.
+    if(!resp || !resp.data || !resp.data.request) throw new Error("Unexpected request response");
     DB.privacyRequests = [resp.data.request, ...(DB.privacyRequests||[])];
     handle.success("Submitted");
     $("pr_desc").value = "";
     renderPrivacyTabBody();
+    if(typeof showPrivacyStatus === "function") showPrivacyStatus("pr_status", "Request submitted — you can track it under \"My Requests\" below.");
     toast("Request submitted");
   }catch(e){
     handle.error("Failed");
-    toast(e?.message?.includes("Too many") ? "Too many requests — please wait a bit and try again" : "Couldn't submit request — try again");
+    const msg = typeof privacyFailureText === "function" ? privacyFailureText(e, "submit the request", true) : "Couldn't submit request — try again";
+    if(typeof showPrivacyStatus === "function") showPrivacyStatus("pr_status", msg, true);
+    toast(msg);
   }
 };
 window.requestDeletion = () => {
@@ -5145,12 +5331,23 @@ window.requestDeletion = () => {
         toast("Privacy action unavailable offline — please reconnect and try again.");
         return;
       }
+      // One in flight at a time: a double-tap must not file two deletion requests (each also
+      // counts against the same hourly limit as "Submit Request").
+      if(window.__mmDeletionInFlight){ toast("Your deletion request is already being submitted"); return; }
+      window.__mmDeletionInFlight = true;
+      if(typeof showPrivacyStatus === "function") showPrivacyStatus("pr_status", "Submitting deletion request…");
       try{
-        const resp = await callWorkerApi("/privacy/delete", { confirm: true });
+        const resp = await callWorkerApi("/privacy/delete", { confirm: true }, typeof PRIVACY_CALL_OPTS !== "undefined" ? PRIVACY_CALL_OPTS : undefined);
+        if(!resp || !resp.data || !resp.data.request) throw new Error("Unexpected deletion response");
         DB.privacyRequests = [resp.data.request, ...(DB.privacyRequests||[])];
         renderPrivacyTabBody();
+        if(typeof showPrivacyStatus === "function") showPrivacyStatus("pr_status", "Deletion request submitted — an administrator will review it. Nothing has been deleted yet.");
         toast("Deletion request submitted — an administrator will review it");
-      }catch(e){ toast("Couldn't submit deletion request — try again"); }
+      }catch(e){
+        const msg = typeof privacyFailureText === "function" ? privacyFailureText(e, "submit the deletion request", true) : "Couldn't submit deletion request — try again";
+        if(typeof showPrivacyStatus === "function") showPrivacyStatus("pr_status", msg, true);
+        toast(msg);
+      }finally{ window.__mmDeletionInFlight = false; }
     }
   });
 };
@@ -5233,9 +5430,10 @@ window.publishCurrentPolicyVersions = async (btnEl) => {
     }
     handle.success("Published");
     renderPrivacyTabBody(); toast("Policy versions published");
+    if(typeof enforcePolicyGate === "function") enforcePolicyGate();
   }catch(e){
     handle.error("Failed");
-    toast("Couldn't publish — try again");
+    toast(typeof privacyFailureText === "function" ? privacyFailureText(e, "publish policy versions") : "Couldn't publish — try again");
   }
 };
 
@@ -5489,6 +5687,7 @@ load(); startCloud();
 // but we let the onSnapshot handler in startCloud() decide what to do once it sees the
 // CURRENT cloud state — pushing blindly here (before ever checking the cloud) was what
 // let a device with stale leftover edits silently overwrite newer data saved elsewhere.
+renderLoginPolicies();
 const sess=sessionStorage.getItem("mm_session");
 if(sess && isSessionExpired()){
     sessionStorage.removeItem("mm_session"); sessionStorage.removeItem("mm_login_time");
@@ -5514,6 +5713,7 @@ if(sess && isSessionExpired()){
         render(); 
         handleShortcutAction();
         startSessionWatcher();
+        enforcePolicyGate();
     } else {
         sessionStorage.removeItem("mm_session"); 
         document.documentElement.classList.remove("authed");
