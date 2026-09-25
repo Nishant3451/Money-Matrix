@@ -56,6 +56,32 @@ const TERMINAL_STATUSES = new Set(["completed", "rejected", "partially_completed
 
 export const POLICY_TYPES = ["privacy_policy", "terms_of_service", "cookie_policy", "data_rights"];
 
+// -------------------------------------------------------------------------------------------
+// SERVER-SIDE POLICY ACCEPTANCE GATE (used by handleDataGet/handleDataSave in login-worker.js).
+//
+// The frontend's mandatory policy gate (policyGateActive() etc. in index.html) is a UX/app-access
+// layer only — it was previously the ONLY enforcement, which meant an authenticated user could
+// bypass it entirely by calling /data/get or /data/save directly (devtools, curl, a modified
+// client) without ever accepting the current required policies. This closes that gap at the
+// actual data layer, the same way resolveSectionPerm/withSectionGating in authorization.js closed
+// the equivalent per-section data-leak gap.
+//
+// "Current required version" per type reuses latestPublishedPolicy (below), the SAME function
+// already used to stamp a privacy request with the policy version in force when it was filed —
+// not a second/parallel notion of "current". A type with no published entry at all is not
+// required yet, matching the frontend's own isPolicyPublished()/policiesNeedingAcceptance()
+// semantics exactly, so a fresh deployment before an admin has published anything does not lock
+// every user out, and the two gates (client UX gate, server data gate) never disagree about what
+// is currently required.
+export function hasAcceptedAllCurrentPolicies(appData, uid) {
+  const mine = ((appData && appData.policyAcceptances) || {})[uid] || {};
+  return POLICY_TYPES.every((type) => {
+    const current = latestPublishedPolicy(appData && appData.policyVersions, type);
+    if (!current) return true; // nothing published for this type yet -- not required
+    return mine[type] && mine[type].version === current.version;
+  });
+}
+
 // Only "essential" is real today (see module comment). Any other key submitted by a client is
 // rejected rather than silently accepted, so the server never records consent for a category
 // that doesn't correspond to real processing.
@@ -175,6 +201,19 @@ export function findPublishedPolicy(policyVersions, policyType, version) {
   return (Array.isArray(policyVersions) ? policyVersions : []).find(
     (p) => p.type === policyType && p.version === version && p.status === "published"
   );
+}
+
+export function currentPublishedPolicySummary(policyVersions) {
+  const versions = Array.isArray(policyVersions) ? policyVersions : [];
+  return POLICY_TYPES
+    .map((type) => latestPublishedPolicy(versions, type))
+    .filter(Boolean)
+    .map((policy) => ({
+      type: policy.type,
+      version: policy.version,
+      effectiveDate: policy.effectiveDate,
+      status: policy.status
+    }));
 }
 
 export function latestPublishedPolicy(policyVersions, policyType) {

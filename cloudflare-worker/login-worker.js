@@ -62,6 +62,8 @@ import {
   getUserRequests,
   findPublishedPolicy,
   latestPublishedPolicy,
+  hasAcceptedAllCurrentPolicies,
+  currentPublishedPolicySummary,
   isValidStatusTransition,
   isKnownConsentCategory,
 } from "./lib/privacy.js";
@@ -202,6 +204,27 @@ function jsonResponse(body, status, headers) {
 // internal step failed, never sensitive data.
 function authError(message, status, headers) {
   return jsonResponse({ error: { message } }, status, headers);
+}
+
+// PART A (server-side hardening): the machine-readable counterpart to authError for the one case
+// the frontend needs to distinguish from every other failure -- see handleDataGet/handleDataSave
+// below and index.html's callWorkerApi/fetchAuthorizedData handling of it. 403 (not 401): the
+// caller IS a genuine authenticated identity, they are simply not yet permitted to use protected
+// application data until they accept the current required policies -- the same distinction the
+// rest of this file already draws between 401 (not authenticated) and 403 (authenticated but not
+// authorized).
+//
+// Includes a minimal `data` block (current policyVersions + the caller's OWN policyAcceptances
+// entry only) so the frontend can render an accurate policy gate without a circular dependency on
+// /data/get itself succeeding first (STEP 3 of the hardening brief). This is NOT protected
+// application data -- no users/shared/perUser/business records of any kind, just the same policy
+// metadata POLICY_CONTENT already ships hardcoded in index.html plus which of it this one caller
+// has accepted, which /privacy/export would already hand back to this same caller anyway.
+function policyAcceptanceRequiredError(cors, appData, uid) {
+  return jsonResponse({
+    error: { message: "Please review and accept the current required policies to continue.", code: "POLICY_ACCEPTANCE_REQUIRED" },
+    data: { policyVersions: currentPublishedPolicySummary(appData && appData.policyVersions), policyAcceptances: { [uid]: ((appData && appData.policyAcceptances) || {})[uid] || {} } },
+  }, 403, cors);
 }
 
 // -------------------------------------------------------------------------------------------
@@ -376,6 +399,14 @@ async function handleDataGet(request, env, cors) {
     const fullData = await readAppData(env, accessToken);
     const me = (fullData.users || []).find((u) => u.id === auth.uid);
     if (!me) return authError("Account not found", 403, cors);
+    // PART A (server-side hardening): policy acceptance is a prerequisite for USING protected
+    // application data, for every authenticated user including superadmin (no role bypass here --
+    // contrast resolveSectionPerm's isFullAccessRole bypass in authorization.js, which is a
+    // different, section-permission concern). Read ONLY from fullData -- the server's own stored
+    // record -- never from anything in the request. This must never block /privacy/* endpoints
+    // (they go through runPrivacyMutation, a separate code path this does not touch), so the user
+    // can always still read policies and call /privacy/policy/accept to satisfy this.
+    if (!hasAcceptedAllCurrentPolicies(fullData, auth.uid)) return policyAcceptanceRequiredError(cors, fullData, auth.uid);
     const view = buildAuthorizedView(fullData, { uid: auth.uid, role: auth.role, linkedId: me.linkedId || null });
     return jsonResponse({ data: { json: JSON.stringify(view) } }, 200, cors);
   } catch (e) {
@@ -427,6 +458,14 @@ async function handleDataSave(request, env, cors) {
       const { data: serverData, updateTime } = await readAppDataWithVersion(env, accessToken);
       const me = (serverData.users || []).find((u) => u.id === auth.uid);
       if (!me) return authError("Account not found", 403, cors);
+      // PART A (server-side hardening): same gate as handleDataGet, and for the same reason --
+      // /data/save is the other endpoint that directly exposes/mutates protected application
+      // data. Checked against serverData (this attempt's freshly-read copy), not any earlier
+      // snapshot, and never against anything in `submitted` (the request body) -- see
+      // hasAcceptedAllCurrentPolicies's own doc comment on why request-supplied acceptance must
+      // never be trusted. A user who hasn't accepted cannot save real application data even if
+      // they craft the request by hand.
+      if (!hasAcceptedAllCurrentPolicies(serverData, auth.uid)) return policyAcceptanceRequiredError(cors, serverData, auth.uid);
 
       const merged = mergeAuthorizedSave(serverData, submitted, {
         uid: auth.uid,
