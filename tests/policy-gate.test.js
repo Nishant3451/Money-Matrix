@@ -60,6 +60,7 @@ const CORE_SRC = [
   extractFunction(mod, "policyStatus"),
   extractFunction(mod, "isPolicyPublished"),
   extractFunction(mod, "policiesNeedingAcceptance"),
+  extractFunction(mod, "policyGateActive"),
   extractFunction(mod, "showPolicyGateError"),
 ].join("\n\n");
 
@@ -94,16 +95,16 @@ function buildSandbox({ dbExtra = {}, firebaseAvailable = true, hasCurrentUser =
 }
 
 const PUBLISHED_ALL = [
-  { type: "privacy_policy", version: "1.3", effectiveDate: "2026-09-18", status: "published" },
+  { type: "privacy_policy", version: "1.4", effectiveDate: "2026-09-23", status: "published" },
   { type: "terms_of_service", version: "1.1", effectiveDate: "2026-09-18", status: "published" },
   { type: "cookie_policy", version: "1.2", effectiveDate: "2026-09-18", status: "published" },
-  { type: "data_rights", version: "1.2", effectiveDate: "2026-09-18", status: "published" },
+  { type: "data_rights", version: "1.3", effectiveDate: "2026-09-23", status: "published" },
 ];
 
 test("policiesNeedingAcceptance: only PUBLISHED + not-yet-accepted (by this user, for the CURRENT app version) shows up", () => {
   const { t } = buildSandbox({ dbExtra: { policyVersions: PUBLISHED_ALL.slice(0, 2) } }); // only 2 of 4 published
   assert.deepEqual(JSON.parse(JSON.stringify(t.policiesNeedingAcceptance())), ["privacy_policy", "terms_of_service"]);
-  const { t: t2 } = buildSandbox({ dbExtra: { policyVersions: PUBLISHED_ALL, policyAcceptances: { u1: { privacy_policy: { version: "1.3", timestamp: 1 }, terms_of_service: { version: "1.1", timestamp: 1 }, cookie_policy: { version: "1.2", timestamp: 1 }, data_rights: { version: "1.2", timestamp: 1 } } } } });
+  const { t: t2 } = buildSandbox({ dbExtra: { policyVersions: PUBLISHED_ALL, policyAcceptances: { u1: { privacy_policy: { version: "1.4", timestamp: 1 }, terms_of_service: { version: "1.1", timestamp: 1 }, cookie_policy: { version: "1.2", timestamp: 1 }, data_rights: { version: "1.3", timestamp: 1 } } } } });
   assert.deepEqual(JSON.parse(JSON.stringify(t2.policiesNeedingAcceptance())), [], "all four accepted -> nothing needed");
   const { t: t3 } = buildSandbox({ dbExtra: { policyVersions: PUBLISHED_ALL, policyAcceptances: { u1: { privacy_policy: { version: "1.2", timestamp: 1 } } } } });
   assert.ok(t3.policiesNeedingAcceptance().includes("privacy_policy"), "accepted an OLD version -> still needed");

@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <meta name="theme-color" content="#146356" />
-<meta name="app-build" content="2026-09-22-reqstatus-locked-ui" />
+<meta name="app-build" content="2026-09-23-server-policy-gate" />
 <title>MoneyMatrix - Enterprise Edition</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -641,7 +641,7 @@
 // Build marker: identifies which source a deployed copy was built from. Also present as
 // <meta name="app-build"> in <head> (readable via view-source / curl without logging in) and
 // shown at the bottom of the Privacy Center overview. Bump this string on each release.
-const APP_BUILD = "2026-09-22-reqstatus-locked-ui";
+const APP_BUILD = "2026-09-23-server-policy-gate";
 try{ console.info("MoneyMatrix build:", APP_BUILD); }catch(e){}
 // Firebase is loaded dynamically and wrapped in try/catch. A static `import` at the top of
 // a module throws synchronously if the CDN can't be reached (blocked network, offline, a
@@ -751,6 +751,16 @@ async function callWorkerApi(path, body, opts) {
     throw Object.assign(new Error("Session expired"), { code: "functions/unauthenticated" });
   }
   if (resp.status === 403) {
+    // PART A (server hardening): /data/get and /data/save answer this specific 403 with a small
+    // { code: "POLICY_ACCEPTANCE_REQUIRED", data: { policyVersions, policyAcceptances } } body
+    // (see login-worker.js's policyAcceptanceRequiredError) rather than the generic
+    // permission-denied shape — fetchAuthorizedData() needs to tell the two apart so a missing
+    // policy acceptance shows the policy gate instead of a "Sync error" toast. Every other 403
+    // (privacy actions, admin-only endpoints, etc.) is completely unaffected: it still gets the
+    // plain "functions/permission-denied" code exactly as before.
+    let policyGateData = null;
+    try { const cloned = await resp.clone().json(); if (cloned?.error?.code === "POLICY_ACCEPTANCE_REQUIRED") policyGateData = cloned.data || {}; } catch (e) { /* not JSON / no body — fall through to the generic 403 below */ }
+    if (policyGateData) throw Object.assign(new Error("Policy acceptance required"), { code: "policy/acceptance-required", status: 403, policyGateData });
     throw Object.assign(new Error("Not authorized"), { code: "functions/permission-denied", status: 403 });
   }
   if (resp.status === 429) {
@@ -1112,6 +1122,25 @@ async function fetchAuthorizedData(){
     if (isModalOpen()) { pendingRemoteJson = newJson; return; } // someone's mid-edit — hold this until they close it
     applyRemoteJson(newJson);
   }catch(e){
+    // PART A (server hardening): a missing/outdated policy acceptance is not a network/sync
+    // failure — show the gate, not an alarming "Sync error" toast, and use the minimal
+    // policyVersions/policyAcceptances the server included specifically so this doesn't need
+    // /data/get to succeed first (see callWorkerApi's 403 handling above and
+    // policyAcceptanceRequiredError in login-worker.js). This does NOT loop or retry itself —
+    // acceptAllPolicies() makes one explicit fetchAuthorizedData() call right after a successful
+    // acceptance (see below), and the existing meta-doc/onSnapshot mechanism (every successful
+    // server mutation, including /privacy/policy/accept, bumps it) will also naturally trigger
+    // this function again on its own — no new polling loop was added.
+    if(e && e.code === "policy/acceptance-required"){
+      const g = e.policyGateData || {};
+      DB.policyVersions = g.policyVersions || [];
+      DB.policyAcceptances = g.policyAcceptances || {};
+      serverViewReceived = true;
+      if(currentUser) render();
+      enforcePolicyGate();
+      setSync("Policy acceptance required", false);
+      return;
+    }
     setSync("Sync error — check network", true);
   }
 }
@@ -2031,6 +2060,14 @@ function topbar(title){
 }
 
 function render(){
+  // Mandatory policy gate (PART A): while active, no page but Privacy Center itself may render —
+  // this is what actually stops sidebar clicks, direct activePage changes, a stale deep link, or
+  // a post-reload restore from ever drawing dashboard/business-data screens before the required
+  // policies are accepted. The full-screen #policyGate overlay (enforcePolicyGate, called from
+  // every entry point that reaches render — completeLogin, applyRemoteJson, the restored-session
+  // boot branch) is the visible lock; this is what backs it so there's no page underneath to see
+  // even if the overlay were somehow removed from the DOM.
+  if(policyGateActive() && activePage !== "privacy") activePage = "privacy";
   if(NAV.find(n=>n.id===activePage)?.req && !canView(activePage)) activePage = "dashboard";
   if(activePage==="admin" && !isAdmin()) activePage="dashboard";
   if(activePage==="permissions" && !isSuperAdmin()) activePage="dashboard";
@@ -3454,13 +3491,65 @@ let productSearch="";
 window.setProductSearch=v=>{ productSearch=v.toLowerCase(); renderProductsResults(); };
 function renderProducts(){
   const writeBtn = canWrite('products') ? `<button class="btn btn-primary" onclick="productModal()"><i class="fas fa-plus"></i> Add Product</button>` : '';
+  // Manage Access (PART D/E/K of the access-control brief): superadmin-only, reuses the exact
+  // same DB.userPermissions[userId]['products'] override the Individual Access Overrides settings
+  // page already writes to (see updateIndivPerm) — this is a focused, single-section shortcut for
+  // that same mechanism, not a second permission store. isSuperAdmin() also gates it so nobody but
+  // a superadmin can even see the button, though the real enforcement is server-side (see
+  // resolveSectionPerm/withSectionGating in cloudflare-worker/lib/authorization.js) and in
+  // updateSectionAccess()'s own guard below, not this UI check alone.
+  const accessBtn = isSuperAdmin() ? `<button class="btn btn-gray" onclick="manageProductAccess()"><i class="fas fa-user-shield"></i> Manage Access</button>` : '';
   $("pageBody").innerHTML=switcher()+`
-    <div class="card"><div class="card-head"><span class="card-title">Product Catalog</span>${writeBtn}</div>
+    <div class="card"><div class="card-head"><span class="card-title">Product Catalog</span><div style="display:flex;gap:10px">${accessBtn}${writeBtn}</div></div>
       <p style="font-size:.82rem;color:var(--text-muted);margin-bottom:16px;line-height:1.4">Set a default price per product here. When you build a Quotation, that price is filled in automatically but stays fully editable per quote — so you can still give someone a custom price or discount without changing the catalog.</p>
       <input id="search_products" class="search" placeholder="Search products..." value="${esc(productSearch)}" oninput="setProductSearch(this.value)">
       <div class="tbl-wrap" id="products_results"></div>
     </div>`;
   renderProductsResults();
+}
+// Sets one user's access to ONE section via the existing DB.userPermissions override mechanism —
+// exactly what updateIndivPerm (Settings > Individual Access) already does, just scoped to a
+// single section so a page's own "Manage Access" button doesn't need to navigate away. Never
+// touches a superadmin's access (they are never offered as a target — see manageSectionAccessHtml
+// — and getPerm()/resolveSectionPerm() both return 'write' for a superadmin unconditionally
+// before this override is even consulted, so there is no override value that could lock one out).
+window.updateSectionAccess = (section, userId, level) => {
+  if(!isSuperAdmin()) return;
+  const target = DB.users.find(u=>u.id===userId);
+  if(!target || target.role==='superadmin') return;
+  if(!DB.userPermissions[userId]) DB.userPermissions[userId] = {};
+  if(level === 'default') delete DB.userPermissions[userId][section];
+  else DB.userPermissions[userId][section] = level;
+  save(true); toast("Access updated");
+};
+window.manageProductAccess = () => {
+  if(!isSuperAdmin()) return;
+  showModal(manageSectionAccessHtml('products', 'Product Catalog', 'Everyone else needs "View" or "Write" here to see the Product Catalog at all — including via direct data access, which the server also enforces.'));
+};
+// Reusable body for a single-section "who can access this" dialog. Not Product-Catalog-specific
+// on purpose: PART G asks for the same principle on Quotations/Invoices, so quotationAccessModal
+// below reuses this rather than duplicating the markup.
+function manageSectionAccessHtml(section, title, note){
+  const rows = DB.users.filter(u=>u.role!=='superadmin').map(u=>{
+    const lvl = DB.userPermissions?.[u.id]?.[section] || 'default';
+    const roleDefault = (DB.permissions?.[u.role]?.[section]) || (u.role==='admin' ? 'write' : (section==='dashboard'?'view':'hidden'));
+    return `<div class="perm-row">
+      <div style="display:flex;align-items:center;gap:12px;flex:1">
+        <div style="width:38px;height:38px;border-radius:10px;background:var(--bg);display:flex;align-items:center;justify-content:center;color:var(--primary);font-size:.95rem;box-shadow:inset 0 0 0 1px #e2e8f0">${esc(((DB.profiles[u.id]?.displayName||u.username)[0]||'?').toUpperCase())}</div>
+        <div><div style="font-weight:700;font-size:.9rem">${esc(DB.profiles[u.id]?.displayName || u.username)}</div><div style="font-size:.72rem;color:var(--text-muted)">${esc(u.role)} · role default: ${esc(roleDefault)}</div></div>
+      </div>
+      <select onchange="updateSectionAccess(${sj(section)}, ${sj(u.id)}, this.value)" style="padding:8px 10px;border-radius:8px;border:1px solid #cbd5e1;font-weight:700;font-size:.82rem">
+        <option value="default" ${lvl==='default'?'selected':''}>Role default</option>
+        <option value="hidden" ${lvl==='hidden'?'selected':''}>No access</option>
+        <option value="view" ${lvl==='view'?'selected':''}>View</option>
+        <option value="write" ${lvl==='write'?'selected':''}>View &amp; Write</option>
+      </select>
+    </div>`;
+  }).join("") || `<div class="empty"><i class="fas fa-users"></i>No other users yet</div>`;
+  return `<div class="modal-head"><h3><i class="fas fa-user-shield"></i> Manage Access — ${esc(title)}</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
+    <p style="font-size:.8rem;color:var(--text-muted);margin-bottom:14px;line-height:1.5"><i class="fas fa-crown" style="color:#f59e0b"></i> Superadmin always has full access here and is not shown below. ${esc(note)}</p>
+    <div style="max-height:50vh;overflow:auto;display:flex;flex-direction:column;gap:8px">${rows}</div>
+    <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Done</button></div>`;
 }
 function renderProductsResults(){
   const d=data(); let rows=[...(d.products||[])].sort((a,b)=>(a.name||"").localeCompare(b.name||""));
@@ -3495,13 +3584,22 @@ let quoteLineItems=[];
 window.setQuoteSearch=v=>{ quoteSearch=v.toLowerCase(); renderQuotationsResults(); };
 function renderQuotations(){
   const writeBtn = canWrite('quotations') ? `<button class="btn btn-primary" onclick="quotationModal()"><i class="fas fa-plus"></i> New Quotation</button>` : '';
+  const accessBtn = isSuperAdmin() ? `<button class="btn btn-gray" onclick="manageQuotationAccess()"><i class="fas fa-user-shield"></i> Manage Access</button>` : '';
   $("pageBody").innerHTML=switcher()+`
-    <div class="card"><div class="card-head"><span class="card-title">Quotations</span>${writeBtn}</div>
+    <div class="card"><div class="card-head"><span class="card-title">Quotations</span><div style="display:flex;gap:10px">${accessBtn}${writeBtn}</div></div>
       <input id="search_quotations" class="search" placeholder="Search by customer name..." value="${esc(quoteSearch)}" oninput="setQuoteSearch(this.value)">
       <div class="tbl-wrap" id="quotations_results"></div>
     </div>`;
   renderQuotationsResults();
 }
+// Same principle as Product Catalog's Manage Access (PART G): sensitive financial records —
+// quotations AND the invoices generated from them (an invoice here is a quotation with an
+// invoiceNumber assigned; there is no separate invoices collection/permission section) — are
+// gated by this one 'quotations' section, reusing the exact same mechanism.
+window.manageQuotationAccess = () => {
+  if(!isSuperAdmin()) return;
+  showModal(manageSectionAccessHtml('quotations', 'Quotations & Invoices', 'This also covers generated invoices — an invoice here is a quotation with an invoice number assigned, not a separate record. Unauthorized users cannot view quotation/invoice data, including via direct data access, which the server also enforces.'));
+};
 function renderQuotationsResults(){
   const d=data(); let rows=[...(d.quotations||[])].sort((a,b)=>new Date(b.date||0).getTime()-new Date(a.date||0).getTime());
   if(quoteSearch) rows=rows.filter(q=>(q.customerName||"").toLowerCase().includes(quoteSearch));
@@ -4330,6 +4428,8 @@ const PERM_SECTIONS_BASE = () => [
     {id:'milteam', name:'Millionaire Team', icon:'fa-gem', desc:'Herbalife Millionaire Team rank roster'},
     {id:'presteam', name:"President's Team", icon:'fa-crown', desc:"Herbalife President's Team rank roster"},
     {id:'backup', name:'System Backup', icon:'fa-database', desc:'Access to export or import system JSON data'},
+    {id:'products', name:'Product Catalog', icon:'fa-box', desc:'View/manage the product price catalog'},
+    {id:'quotations', name:'Quotations & Invoices', icon:'fa-file-invoice-dollar', desc:'Sensitive: customer quotations, totals, and generated invoices'},
     ...(DB.customSections||[]).map(cs=>({id:cs.id, name:cs.label, icon:cs.icon||'fa-folder', desc:'Custom section'}))
 ];
 function renderPermissions() {
@@ -4401,6 +4501,8 @@ const INDIV_SECTIONS_BASE = () => [
     {id:'milteam', name:'Millionaire Team', icon:'fa-gem'},
     {id:'presteam', name:"President's Team", icon:'fa-crown'},
     {id:'backup', name:'System Backup', icon:'fa-database'},
+    {id:'products', name:'Product Catalog', icon:'fa-box'},
+    {id:'quotations', name:'Quotations & Invoices', icon:'fa-file-invoice-dollar'},
     ...(DB.customSections||[]).map(cs=>({id:cs.id, name:cs.label, icon:cs.icon||'fa-folder'}))
 ];
 function renderIndividualAccess() {
@@ -4776,10 +4878,10 @@ function showPrivacyStatus(id, msg, isError){
   el.style.display = msg ? "block" : "none";
   el.style.color = isError ? "var(--danger)" : "var(--primary)";
 }
-const PRIVACY_POLICY_VERSION = "1.3";
+const PRIVACY_POLICY_VERSION = "1.4";
 const TERMS_VERSION = "1.1";
 const COOKIE_POLICY_VERSION = "1.2";
-const DATA_RIGHTS_VERSION = "1.2";
+const DATA_RIGHTS_VERSION = "1.3";
 
 const POLICY_CONTENT = {
   privacy_policy: { version: PRIVACY_POLICY_VERSION, title: "Privacy Policy", body:
@@ -4815,7 +4917,7 @@ Within the app itself, what a colleague can see about your data depends on their
 PINs are stored only as secure hashes, never in plain text. Protected application data reads and writes are authorized server-side. The client also subscribes to a lightweight metadata document used for synchronization notifications; it does not contain the application's protected business data. Sessions expire automatically and can be forcibly revoked. Rate limiting protects sensitive endpoints from abuse.
 
 7. RETENTION — ACCOUNT DELETION VS. BUSINESS RECORDS
-Deleting a user's login/account removes that user's access to Money Matrix; it does not delete the business records (clients, transactions, and other entries) that user made. Those records were entered on behalf of, and remain part of, your organization's business data, and are retained as organizational records after the login/account itself is deleted — see the Data Deletion & User Rights policy for full detail. No fixed retention period is specified beyond this: records are kept for as long as your organization's Money Matrix data is active, plus any additional time required by applicable law.
+Money Matrix is a private business management/CRM application. Business and customer-related records that are shared/organizational data may be retained indefinitely. Deleting a user's account or login does not automatically delete the shared organizational business records associated with that user's activity. Such records may include customer information, transactions, payments, quotations, invoices, team/member records, product/business records, and other business records. These shared records may remain stored after the user's account is deleted, and may be retained for as long as the owner or authorized administrator of your organization determines they are required for the business, subject to applicable legal requirements. Deleting a login/account and deleting the shared business records associated with that account's activity are two separate operations — see the Data Deletion & User Rights policy for how each works, including how this differs for an account that was instead using a private (non-shared) data area.
 
 8. YOUR CONTROLS
 From this Privacy Center you can: view the data linked to your account ("My Data"), export it, request a correction, request deletion, manage your consent/preference records, and raise a privacy question or complaint.
@@ -4899,8 +5001,9 @@ You can submit a Request Account Deletion request from the "My Requests" tab. Su
 4. WHAT ACCOUNT DELETION DOES AND DOES NOT DO
 If a deletion request is approved and completed:
 • Your login/account access to Money Matrix is removed.
-• Business records you entered (clients, transactions, quotations, and similar entries) are NOT automatically deleted along with your account. Those records were made on behalf of, and remain part of, your organization's business data, and are retained as organizational records.
-These business records are organizational records, not your personal property — entering a record on your organization's behalf does not make you its personal owner. Deletion of your login/account must not be understood as deletion of all business records connected to your activity — the two are separate.
+• Business records you entered into your organization's SHARED/organizational data (clients, transactions, payments, quotations, invoices, team/member records, and similar entries) are NOT automatically deleted along with your account. Those records were made on behalf of, and remain part of, your organization's business data, and are retained as organizational records — see the Privacy Policy's Retention section for the full retention rule, including that such records may be retained indefinitely at the determination of the owner or authorized administrator.
+• If your account was instead using a PRIVATE (non-shared) data area rather than your organization's shared data, records kept only in that private area are tied to your account and are removed together with it when your account is deleted, since they are not organizational records shared with anyone else.
+These shared business records are organizational records, not your personal property — entering a record on your organization's behalf does not make you its personal owner. Deletion of your login/account must not be understood as deletion of all shared business records connected to your activity — the two are separate operations, and there is currently no self-service control that deletes shared business records directly; that remains an administrator-determined action, subject to applicable legal requirements.
 
 5. RESPONSE TIME
 No fixed response-time guarantee (SLA) is currently provided for correction, deletion, or other privacy requests. Requests are reviewed by your organization's Admin/Superadmin as part of the administrator-reviewed workflow described above.
@@ -5023,6 +5126,16 @@ function policiesNeedingAcceptance(){
   if(!currentUser) return [];
   return Object.keys(POLICY_CONTENT).filter(type => isPolicyPublished(type) && !policyStatus(type).accepted);
 }
+// Single source of truth for "is the mandatory policy gate currently blocking the app" — used by
+// enforcePolicyGate() (show/hide the gate itself), render() (block navigation to any page but
+// Privacy Center), and showModal() (block every OTHER modal, e.g. Quick Add, so the gate can't be
+// worked around by opening something on top of it). Requires a real authenticated session AND
+// the server's own view of policyVersions/policyAcceptances (serverViewReceived) — never decided
+// from any local/cached guess, since there is nothing about policy acceptance stored in
+// localStorage/sessionStorage for a user to edit in the first place.
+function policyGateActive(){
+  return !!(firebaseAvailable && currentUser && serverViewReceived && policiesNeedingAcceptance().length);
+}
 window.viewPolicy = (type) => {
   const policy = POLICY_CONTENT[type];
   if(!policy) return;
@@ -5040,7 +5153,7 @@ window.viewPolicy = (type) => {
     <div class="modal-btns">
       <button class="btn btn-gray" onclick="closeModal()">Close</button>
       ${action}
-    </div>`);
+    </div>`, {allowDuringGate:true});
 };
 // Records acceptance of the CURRENT code version of one policy. Identity is never sent: the
 // Worker derives the uid from the verified Firebase ID token. Local state is only written AFTER
@@ -5102,8 +5215,8 @@ function renderLoginPolicies(){
 window.showPolicyGateError = (msg) => { const el = $("pgError"); if(el){ el.textContent = msg || ""; el.style.display = msg ? "block" : "none"; } };
 function enforcePolicyGate(){
   const gate = $("policyGate");
-  const missing = (firebaseAvailable && currentUser && serverViewReceived) ? policiesNeedingAcceptance() : [];
-  if(!missing.length){ if(gate) gate.remove(); return; }
+  if(!policyGateActive()){ if(gate) gate.remove(); return; }
+  const missing = policiesNeedingAcceptance();
   const agreed = !!($("pgAgree") && $("pgAgree").checked);
   const prevErr = ($("pgError") && $("pgError").textContent) || "";
   const el = gate || Object.assign(document.createElement("div"), { id: "policyGate", className: "policy-gate" });
@@ -5140,8 +5253,13 @@ window.acceptAllPolicies = async (btnEl) => {
   }
   if(handle) allOk ? handle.success("Recorded") : handle.error("Failed");
   const lastErr = $("pgError") && $("pgError").textContent;
-  enforcePolicyGate();   // removes the gate only if nothing is left to accept
+  enforcePolicyGate();   // removes the gate only if nothing is left to accept (client-side view)
   if(!allOk && $("policyGate") && !$("pgError").textContent) showPolicyGateError(lastErr || "Couldn't record your acceptance — please try again.");
+  // PART A (server hardening): the client's own local view (above) is a UX convenience only —
+  // the actual unlock is /data/get succeeding server-side. One explicit retry here (not a loop)
+  // picks that up immediately rather than waiting on the meta-doc/onSnapshot round trip, which
+  // will also naturally re-fire this same function on its own.
+  if(allOk && typeof fetchAuthorizedData === "function") fetchAuthorizedData();
 };
 
 function privacyConsentHtml(){
@@ -5680,7 +5798,19 @@ window.performDeleteCustom = (sectionId, id) => {
 };
 
 /* ===== Modal plumbing ===== */
-function showModal(html){ $("modalRoot").innerHTML=`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal">${html}</div></div>`; }
+// opts.allowDuringGate: this modal is allowed to open while the mandatory policy gate (PART A) is
+// blocking the app. Reading a policy's full text (viewPolicy) is the only caller that sets this —
+// per the requirement that policies stay readable while locked. Everything else that opens a
+// modal (Quick Add, editing any record, Privacy Center's own Review/deletion-confirm dialogs,
+// etc.) is deliberately left blocked: the one action guaranteed to work during the gate is
+// reading and accepting the current policies (acceptPolicy/acceptAllPolicies don't use showModal
+// at all), which is what the app-access requirement actually asks for. Re-asserting the gate
+// on a blocked attempt (rather than silently no-op-ing) keeps it visible if anything tried to
+// remove or cover it.
+function showModal(html, opts){
+  if(policyGateActive() && !(opts && opts.allowDuringGate)){ enforcePolicyGate(); return; }
+  $("modalRoot").innerHTML=`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal">${html}</div></div>`;
+}
 /* ===== Generic animated confirm modal (Priority 3) =====
    Replaces native confirm() with the app's existing showModal/closeModal system so the
    confirmation looks and behaves like every other modal (fade/scale in-out, Escape-to-cancel,

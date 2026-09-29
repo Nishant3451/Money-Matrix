@@ -41,7 +41,20 @@ function between(source, startMarker, endMarker) {
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- Quick Add harness: real showModal/closeModal/openQuickAddMenu/quickAddGo ----------
-const showModalSrc = html.match(/^function showModal\(html\)\{.*$/m)[0];
+const showModalSrc = (() => {
+  const start = html.indexOf("function showModal(html, opts){");
+  if (start < 0) throw new Error("showModal(html, opts) not found");
+  const open = html.indexOf("{", start);
+  let depth = 0;
+  for (let i = open; i < html.length; i++) {
+    if (html[i] === "{") depth++;
+    else if (html[i] === "}") {
+      depth--;
+      if (depth === 0) return html.slice(start, i + 1);
+    }
+  }
+  throw new Error("showModal function end not found");
+})();
 const reducedMotionSrc = html.match(/^const mmReducedMotion = .*$/m)[0];
 const closeModalSrc = between(html, "window.closeModal=()=>{", "document.addEventListener('keydown'");
 const quickAddSrc = between(html, "const QUICK_ADD_ACTIONS", "/* ===== Dashboard ===== */");
@@ -55,6 +68,7 @@ function buildQuickAddEnv({ perms, reducedMotion = false }) {
     var pendingRemoteJson = null, isDirty = false, applyRemoteJson = () => {};
     var __perms = ${JSON.stringify(perms)};
     var canWrite = (s) => !!__perms[s];
+    var policyGateActive = () => false;
     ${showModalSrc}
     ${reducedMotionSrc}
     ${closeModalSrc}
