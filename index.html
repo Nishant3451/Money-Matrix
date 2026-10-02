@@ -6,6 +6,8 @@
 <meta name="theme-color" content="#146356" />
 <meta name="app-build" content="2026-09-23-server-policy-gate" />
 <title>MoneyMatrix - Enterprise Edition</title>
+<meta name="description" content="MoneyMatrix — a private business management workspace for authorised team members: clients, quotations, payments and team records." />
+<meta name="robots" content="noindex, nofollow" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
@@ -131,6 +133,7 @@
   .sidebar-brand{padding:0 22px 20px;border-bottom:1px solid var(--sidebar-border);margin-bottom:6px}
   .sidebar-brand h1{font-family:var(--font-display);font-size:1.3rem;font-weight:700;color:#fff;letter-spacing:-.5px;display:flex;align-items:center;gap:9px}
   .sidebar-brand h1 i{color:var(--gold);font-size:1.05rem}
+  .brand-link{color:inherit;text-decoration:none;display:flex;align-items:center;gap:9px;border-radius:var(--r-sm)}
   .sidebar-brand p{font-size:.63rem;color:var(--sidebar-text-dim);margin-top:5px;text-transform:uppercase;letter-spacing:1.6px;font-weight:700}
   .nav-section-lbl{font-size:.64rem;font-weight:800;color:var(--sidebar-section-lbl);text-transform:uppercase;letter-spacing:1.1px;padding:18px 22px 7px}
   .nav-scroll>.nav-section-lbl:first-child{padding-top:14px}
@@ -232,6 +235,13 @@
   .search{width:100%;padding:10px 13px;border:1px solid var(--border);border-radius:var(--r-sm);margin-bottom:12px;background:var(--surface)}
   .filter-row{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;background:var(--surface-2);padding:9px;border-radius:var(--r-md);border:1px solid var(--border)}
   .filter-row .search{margin-bottom:0;flex:1;background:var(--surface)}
+  /* Data Scope / Payment Status controls: labelled fields that wrap (desktop) or stack full-width (phones, see the mobile block) */
+  .filter-field{display:flex;flex-direction:column;gap:4px;min-width:150px;flex:0 1 190px}
+  .filter-field .fl{font-size:.68rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.3px}
+  .filter-field select{min-width:0;width:100%;min-height:42px}
+  .scope-chip{min-height:42px;display:flex;align-items:center;padding:0 13px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface);font-weight:600;font-size:.88rem;color:var(--text)}
+  .scope-note{font-size:.76rem;color:var(--text-muted);margin:-6px 0 12px;line-height:1.45;overflow-wrap:anywhere}
+  .scope-note:empty{display:none}
   .filter-row select{padding:10px 13px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface);min-width:140px;font-weight:500}
 
   table{width:100%;border-collapse:separate;border-spacing:0}
@@ -375,26 +385,60 @@
   .client-combo-empty{padding:10px 13px;font-size:.82rem;color:var(--text-muted)}
   html[data-theme="dark"] .client-combo-list{background:var(--surface);border-color:var(--border-strong)}
 
-  .quote-line-row{display:grid;grid-template-columns:1.3fr 1.3fr 60px 90px 80px 90px 40px;gap:8px;align-items:end;margin-bottom:10px;padding:10px;background:var(--bg);border-radius:var(--r-md);border:1px solid var(--border)}
-  .qlf label{font-size:.66rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;display:block;margin-bottom:4px}
-  .qlf select, .qlf input{width:100%;padding:9px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface);color:var(--text);font-size:.85rem}
-  .qlf-total-val{padding:9px 0;font-weight:700;color:var(--text);text-align:right;font-family:var(--font-mono);font-size:.9rem}
-  .qlf-del{display:flex;justify-content:flex-end}
-  @media(max-width:640px){
-    .quote-line-row{grid-template-columns:1fr 1fr;grid-template-areas:"prod name" "qty price" "disc total" "del del"}
-    .qlf-product{grid-area:prod} .qlf-name{grid-area:name} .qlf-qty{grid-area:qty} .qlf-price{grid-area:price}
-    .qlf-disc{grid-area:disc} .qlf-total{grid-area:total} .qlf-total-val{text-align:left}
-    .qlf-del{grid-area:del}
-    .qlf-del button{width:100%}
+  /* Quotation line items. The row needs ~940px to sit on one line with readable product/name fields (7 controls, fixed 136px
+     total column so every row's columns align), but the modal is capped (1040px), so the layout is driven by the WIDTH OF THE
+     LINE-ITEM CONTAINER (container queries), not the viewport: stacked card on phones, two rows in
+     the middle, one row only when it genuinely fits (>=940px). Default (no container-query support) = stacked. */
+  #quoteItemsWrap{container-type:inline-size;container-name:qlines}
+  .quote-line-row{display:grid;gap:10px 12px;align-items:end;margin-bottom:12px;padding:14px;background:var(--bg);border-radius:var(--r-md);border:1px solid var(--border);
+    grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+    grid-template-areas:"prod prod" "name name" "qty price" "disc total" "del del"}
+  .qlf{min-width:0}
+  .qlf-product{grid-area:prod} .qlf-name{grid-area:name} .qlf-qty{grid-area:qty} .qlf-price{grid-area:price}
+  .qlf-disc{grid-area:disc} .qlf-total{grid-area:total} .qlf-del{grid-area:del}
+  .qlf label,.qlf .qlf-label{font-size:.68rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.3px;display:block;margin-bottom:5px;white-space:nowrap}
+  .qlf select,.qlf input{width:100%;min-height:42px;padding:9px 10px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface);color:var(--text);font-size:.88rem;text-overflow:ellipsis}
+  .qlf input[type=number]{-moz-appearance:textfield;appearance:textfield}
+  .qlf input[type=number]::-webkit-outer-spin-button,.qlf input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+  .qlf-total-val{min-height:42px;display:flex;align-items:center;justify-content:flex-start;padding:0 12px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-sm);font-weight:700;color:var(--text);font-family:var(--font-mono);font-size:.9rem;white-space:nowrap;overflow:hidden}
+  .qlf-del{display:flex;justify-content:stretch}
+  .qlf-del button{width:100%;min-height:42px}
+  @container qlines (max-width:330px){
+    .quote-line-row{grid-template-areas:"prod prod" "name name" "qty price" "disc disc" "total total" "del del"}
   }
+  @container qlines (min-width:520px){
+    .quote-line-row{grid-template-columns:minmax(0,.8fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.2fr) 44px;
+      grid-template-areas:"prod prod name name name" "qty price disc total del"}
+    .qlf-total-val{justify-content:flex-end}
+    .qlf-del button{width:44px;padding-left:0;padding-right:0}
+    .qlf-del-text{display:none}
+  }
+  @container qlines (min-width:940px){
+    .quote-line-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr) 76px 110px 88px 136px 44px;
+      grid-template-areas:"prod name qty price disc total del"}
+  }
+  .form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr));gap:0 16px;align-items:end}
+  .quote-lines-head{margin:16px 0 8px;font-weight:700;font-size:.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.3px}
+  .quote-totals{border-top:1px solid var(--border);padding-top:12px;display:flex;flex-direction:column;gap:6px}
+  .quote-totals>div{display:flex;justify-content:space-between;gap:12px;font-size:.85rem;color:var(--text-muted)}
+  .quote-totals>div span:last-child{font-family:var(--font-mono);white-space:nowrap}
+  .quote-totals>.quote-grand{font-size:1.1rem;font-weight:800;color:var(--text)}
 
-  .modal-bg{position:fixed;inset:0;background:rgba(11,14,12,.62);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px;overflow-y:auto}
-  .modal{background:var(--surface);border-radius:var(--r-lg);padding:24px;width:100%;max-width:500px;border:1px solid var(--border);margin:auto;box-shadow:var(--shadow-lg)}
-  .modal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;border-bottom:1px solid var(--border);padding-bottom:14px}
-  .modal-head h3{font-family:var(--font-display);font-size:1.15rem;font-weight:700;color:var(--text)}
-  .modal-close{background:var(--surface-2);width:30px;height:30px;border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;font-size:1rem;color:var(--text-muted);transition:background .12s var(--ease),color .12s var(--ease)}
+  /* Modals: viewport-safe height with internal scrolling, a stable header and footer (sticky, so
+     every one of the ~28 existing modals gets them without changing its markup), and a wide variant
+     for content that genuinely needs room (quotation line items). */
+  html.mm-modal-open{overflow:hidden}
+  .modal-bg{position:fixed;inset:0;background:rgba(11,14,12,.62);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px;overflow-y:auto;overscroll-behavior:contain}
+  .modal{--modal-pad:24px;background:var(--surface);border-radius:var(--r-lg);padding:var(--modal-pad);width:100%;max-width:500px;max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);overflow-y:auto;overscroll-behavior:contain;border:1px solid var(--border);margin:auto;box-shadow:var(--shadow-lg)}
+  .modal:focus{outline:none}
+  .modal.modal-wide{max-width:1040px}
+  .modal-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px;border-bottom:1px solid var(--border);padding-bottom:14px}
+  .modal>.modal-head:first-child{position:sticky;top:calc(var(--modal-pad) * -1);z-index:3;background:var(--surface);margin:calc(var(--modal-pad) * -1) calc(var(--modal-pad) * -1) 18px;padding:18px var(--modal-pad) 14px}
+  .modal-head h3{font-family:var(--font-display);font-size:1.15rem;font-weight:700;color:var(--text);min-width:0;overflow-wrap:anywhere}
+  .modal-close{flex-shrink:0;background:var(--surface-2);width:36px;height:36px;border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;font-size:1rem;color:var(--text-muted);transition:background .12s var(--ease),color .12s var(--ease)}
   .modal-close:hover{background:var(--border);color:var(--text)}
-  .modal-btns{display:flex;gap:10px;justify-content:flex-end;margin-top:8px}
+  .modal-btns{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:8px}
+  .modal>.modal-btns:last-child{position:sticky;bottom:calc(var(--modal-pad) * -1);z-index:3;background:var(--surface);margin:16px calc(var(--modal-pad) * -1) calc(var(--modal-pad) * -1);padding:14px var(--modal-pad);border-top:1px solid var(--border)}
 
   .profile-banner{display:flex;align-items:center;gap:20px;padding:24px;background:var(--primary);border-radius:var(--r-lg);color:#fff;margin-bottom:22px}
   .profile-av{width:60px;height:60px;border-radius:var(--r-lg);background:#fff;color:var(--primary);display:flex;align-items:center;justify-content:center;font-size:1.75rem;font-weight:800}
@@ -423,11 +467,13 @@
   #updateBanner button{background:var(--gold);color:#fff;border:none;padding:8px 18px;border-radius:var(--r-sm);font-weight:700;font-size:.85rem;cursor:pointer}
   #updateBanner button:hover{background:var(--gold-hover)}
   @media(max-width:900px){ #updateBanner{padding-bottom:calc(14px + env(safe-area-inset-bottom))} }
-  .toast{position:fixed;bottom:20px;right:20px;background:var(--ink);color:#fff;padding:13px 18px;border-radius:var(--r-md);z-index:2000;font-weight:600;display:flex;align-items:center;gap:10px;border:1px solid #262E29;font-size:.88rem}
+  .toast{max-width:min(420px,calc(100vw - 24px));overflow-wrap:anywhere;position:fixed;bottom:20px;right:20px;background:var(--ink);color:#fff;padding:13px 18px;border-radius:var(--r-md);z-index:2000;font-weight:600;display:flex;align-items:center;gap:10px;border:1px solid #262E29;font-size:.88rem}
 
   @media(max-width:900px){
-    .sidebar{transform:translateX(-100%); width:252px; padding-top:calc(20px + env(safe-area-inset-top))}
-    .sidebar.open{transform:translateX(0)}
+    /* Closed off-canvas sidebar is also visibility:hidden (after the slide-out finishes) so its links
+       can't be tabbed to or read by a screen reader while off-screen. */
+    .sidebar{transform:translateX(-100%); visibility:hidden; transition:transform .25s var(--ease),visibility 0s linear .25s; width:252px; padding-top:calc(20px + env(safe-area-inset-top))}
+    .sidebar.open{transform:translateX(0); visibility:visible; transition-delay:0s}
     .sidebar-footer{padding-bottom:calc(14px + env(safe-area-inset-bottom))}
     .main{margin-left:0; padding:14px; padding-top:calc(14px + env(safe-area-inset-top));}
     .topbar { flex-direction: column; align-items: stretch; gap: 12px; padding: 14px; margin-bottom: 16px; position: relative; top: 0; border-radius: var(--r-md); }
@@ -444,6 +490,7 @@
     .stats { grid-template-columns: 1fr 1fr; gap: 10px; }
     .stat{padding:14px}
     .filter-row{flex-direction:column}
+    .filter-field{flex:1 1 auto;min-width:0;width:100%}
     .filter-row select{width:100%}
     .dash-hero{padding:20px}
     .dash-hero-greeting{font-size:1.2rem}
@@ -455,8 +502,14 @@
     td { text-align: right; padding: 9px 0 9px 40%; position: relative; border-bottom: 1px solid var(--border); min-height:38px; display:flex; justify-content:flex-end; align-items:center; flex-wrap:wrap; gap:8px; width: 100% !important; }
     td:last-child { border-bottom: 0; padding-bottom: 0; }
     td::before { content: attr(data-label); position: absolute; left: 0; top:50%; transform:translateY(-50%); font-weight: 700; color: var(--text-muted); font-size:.72rem; text-transform:uppercase; letter-spacing:.4px; text-align: left; width: 35%; }
-    .modal{max-height:90vh;overflow-y:auto;border-radius:var(--r-lg) var(--r-lg) 0 0;margin:auto 0 0;max-width:100%}
+    .modal{--modal-pad:18px;max-height:92vh;max-height:92dvh;border-radius:var(--r-lg) var(--r-lg) 0 0;margin:auto 0 0;max-width:100%;padding-bottom:calc(var(--modal-pad) + env(safe-area-inset-bottom))}
+    .modal.modal-wide{max-width:100%}
+    .modal>.modal-btns:last-child{bottom:calc((var(--modal-pad) + env(safe-area-inset-bottom)) * -1);margin-bottom:calc((var(--modal-pad) + env(safe-area-inset-bottom)) * -1);padding-bottom:calc(14px + env(safe-area-inset-bottom))}
+    .modal>.modal-btns:last-child .btn{flex:1}
+    .modal-close{width:40px;height:40px}
     .modal-bg{align-items:flex-end;padding:0}
+    /* iOS Safari zooms the page on focus of any control under 16px — that is what made forms jump */
+    input,select,textarea,.qlf select,.qlf input{font-size:16px}
     .seg-toggle{width:100%}
     .seg-btn{flex:1;justify-content:center}
   }
@@ -493,6 +546,9 @@
 
   /* Toast entrance/exit */
   .toast{animation:mmToastIn .22s var(--ease)}
+  .toast.toast-error{border-color:var(--danger)}
+  /* On phones a bottom toast would sit on top of the modal's sticky Save/Cancel bar — put it at the top. */
+  @media(max-width:600px){ .toast{bottom:auto;top:calc(12px + env(safe-area-inset-top));left:12px;right:12px;max-width:none} }
   .toast.mm-leave{animation:mmToastOut .18s var(--ease) forwards}
 
   /* Generic button state system: data-state="loading|success|error" */
@@ -540,6 +596,17 @@
      can't regress per-entity logic. Purely a hover transform — respects the blanket
      prefers-reduced-motion rule above like every other transition in this file. */
   .btn-sm:not(:disabled):hover{transform:translateY(-1px)}
+  /* Touch targets: on phones / touch screens the icon-only row actions (edit next to DELETE) were 24-28px wide, which is an
+     easy mis-tap, and the header / dismiss / segmented controls were 26-38px. Raise them to 40px. Desktop (mouse) unchanged. */
+  @media (max-width:600px), (pointer:coarse){
+    /* min-width needs !important: the Call / e-mail links carry an inline min-width:28px */
+    .btn.btn-sm{min-height:40px;min-width:40px!important;padding-left:12px;padding-right:12px}
+    #pageBody select,#pageBody input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file]){min-height:40px}
+    td .btn.btn-sm + .btn.btn-sm{margin-left:8px}
+    .menu-btn,.topbar-logout-btn,.dash-quick-toggle{min-width:40px;min-height:40px}
+    .alert-x-btn{min-width:40px;min-height:40px}
+    .seg-btn{min-height:40px}
+  }
 </style>
 </head>
 <body>
@@ -594,9 +661,9 @@
 <!-- APP -->
 <div id="appShell" class="hidden">
   <div class="sidebar-backdrop" id="sidebarBackdrop" onclick="closeSidebar()"></div>
-  <div class="sidebar">
+  <div class="sidebar" id="appSidebar">
     <div class="sidebar-brand">
-      <h1><i class="fas fa-layer-group"></i> MoneyMatrix</h1>
+      <h1><a class="brand-link" href="./" onclick="event.preventDefault();go('dashboard')" title="Go to Dashboard"><i class="fas fa-layer-group" aria-hidden="true"></i> MoneyMatrix</a></h1>
       <p id="welcomeLine">Workspace Ready</p>
     </div>
     <div id="navList" class="nav-scroll"></div>
@@ -614,7 +681,7 @@
     <div id="syncBar">Connecting…</div>
     <div class="topbar">
       <div class="topbar-header">
-        <button class="menu-btn" onclick="toggleSidebar()"><i class="fas fa-bars"></i></button>
+        <button class="menu-btn" onclick="toggleSidebar()" aria-label="Open navigation menu" aria-controls="appSidebar" aria-expanded="false"><i class="fas fa-bars" aria-hidden="true"></i></button>
         <div class="topbar-title-block">
           <div class="topbar-overline" id="pageOverline">Overview</div>
           <h2 id="pageTitle">Dashboard</h2>
@@ -712,6 +779,38 @@ const firebaseConfig = {
 // /data/save, and /user/setPin respectively. See cloudflare-worker/README.md.
 const LOGIN_ENDPOINT = "https://moneymatrix-login.moneymatrix-login.workers.dev";
 
+// ===== Session lifecycle guard (logout / forced-logout race protection) =====
+// Root cause of the spurious "Sync error" on logout: the moment a session is terminated the
+// app still had live authenticated work in flight — the Firestore meta-doc listener, a
+// /data/get fetch, a debounced /data/save, the pagehide flush — and every one of those then
+// failed ("Not signed in", a revoked token, or a fetch aborted by location.reload()) and was
+// reported as an ordinary sync failure. `sessionEnding` marks the intentional-termination
+// window; `authGeneration` lets any request detect that the session it started under is gone,
+// so a late result is dropped instead of touching the logged-out UI. ONLY errors that are the
+// direct consequence of the session ending are ignored (code "session/ended") — a genuine
+// network failure, a 401 on a live session, a 403, or the policy gate are all unchanged.
+let authGeneration = 0;
+let sessionEnding = false;
+let metaUnsub = null;
+const isSessionEndError = (e) => !!e && e.code === "session/ended";
+function stopCloudSync(){
+  if (typeof metaUnsub === "function") { try { metaUnsub(); } catch (e) { /* already detached */ } }
+  metaUnsub = null;
+  cloudSyncStarted = false;
+}
+// Idempotent. Returns true only for the call that actually started the termination.
+function beginSessionTermination(){
+  if (sessionEnding) return false;
+  sessionEnding = true;
+  authGeneration++;
+  if (typeof writeTimer !== "undefined" && writeTimer) { clearTimeout(writeTimer); writeTimer = null; }
+  pendingRemoteJson = null;
+  stopCloudSync();
+  return true;
+}
+// Called when a fresh login begins, so its requests run under a new, live generation.
+function beginSession(){ sessionEnding = false; authGeneration++; }
+
 // Thin replacement for Firebase's httpsCallable(): same {data: ...} response shape and same
 // thrown-error-with-.code convention (existing catch blocks check e.code ===
 // "functions/permission-denied", so that convention is preserved rather than changed)  — but
@@ -721,6 +820,10 @@ const LOGIN_ENDPOINT = "https://moneymatrix-login.moneymatrix-login.workers.dev"
 // Privacy Center passes it (see PRIVACY_API_TIMEOUT_MS) so a hung request can't leave a button
 // stuck on "Loading…" forever; every other caller is unchanged (no timeout, as before).
 async function callWorkerApi(path, body, opts) {
+  const gen = authGeneration;
+  const ended = () => sessionEnding || gen !== authGeneration;
+  const endedError = () => Object.assign(new Error("Session ended"), { code: "session/ended" });
+  if (ended()) throw endedError();
   if (!auth || !auth.currentUser) {
     throw Object.assign(new Error("Not signed in"), { code: "functions/unauthenticated" });
   }
@@ -740,12 +843,23 @@ async function callWorkerApi(path, body, opts) {
       throw e;
     } finally { if (timer) clearTimeout(timer); }
   };
-  let resp = await doFetch(await auth.currentUser.getIdToken());
-  if (resp.status === 401) {
-    // The token may simply be stale (e.g. claims changed since it was minted) — force a real
-    // refresh once before treating this as a genuine session failure.
-    resp = await doFetch(await auth.currentUser.getIdToken(true));
+  let resp;
+  try {
+    resp = await doFetch(await auth.currentUser.getIdToken());
+    if (resp.status === 401 && !ended()) {
+      // The token may simply be stale (e.g. claims changed since it was minted) — force a real
+      // refresh once before treating this as a genuine session failure.
+      resp = await doFetch(await auth.currentUser.getIdToken(true));
+    }
+  } catch (e) {
+    // A logout mid-request makes the token lookup or the fetch itself fail (or aborts it on
+    // reload). That is the session ending, not a network problem.
+    if (ended()) throw endedError();
+    throw e;
   }
+  // The session this request started under is gone: drop the result entirely — it must not
+  // trigger a forced-logout message, a policy gate, or any UI update on the logged-out screen.
+  if (ended()) throw endedError();
   if (resp.status === 401) {
     if (typeof forceLogout === "function") forceLogout("Your session expired — please log in again.");
     throw Object.assign(new Error("Session expired"), { code: "functions/unauthenticated" });
@@ -771,7 +885,9 @@ async function callWorkerApi(path, body, opts) {
   if (!resp.ok) {
     throw Object.assign(new Error("Request failed"), { code: "functions/internal", status: resp.status });
   }
-  return resp.json();
+  const out = await resp.json();
+  if (ended()) throw endedError();
+  return out;
 }
 
 let fbApp=null, db=null, DOC=null, META=null, auth=null, setUserPinFn=null, saveAppDataFn=null, getAppDataFn=null;
@@ -800,7 +916,13 @@ if (firebaseAvailable) {
     // is what (re)starts sync both right after a fresh login and after a same-tab reload
     // where the browser-session-scoped Firebase session is still valid.
     onAuthStateChanged(auth, (user) => {
-      if (user) { startCloud(); return; }
+      if (user) {
+        // A restored session that a page-load timeout / logout is already tearing down must
+        // not restart sync behind the login screen.
+        if (sessionEnding) return;
+        startCloud(); return;
+      }
+      stopCloudSync(); // signed out (by us or otherwise): detach the listener so it can't error out
       // No valid Firebase session, but the app still thinks it's logged in (e.g. its
       // IndexedDB-backed auth state didn't survive something that sessionStorage did) —
       // don't leave it showing a logged-in screen with no real access to cloud data.
@@ -890,6 +1012,8 @@ function cloudSave(immediate = false){
         // lastCloudJson/mm_last_base_json against the real authorized view itself.
         return {ok:true};
     }).catch(e=>{
+      // The session ended while this save was queued/in flight (logout): expected, not a failure.
+      if(isSessionEndError(e) || sessionEnding) return {ok:false, error:e, sessionEnded:true};
       if(e && e.code === "functions/permission-denied"){
         setSync("Change rejected — refreshing…", true);
         toast("That change wasn't allowed and couldn't be saved — reloading to stay in sync.");
@@ -1081,6 +1205,7 @@ function startCloud(){
   // restored same-tab session) there's simply no valid request.auth to use, so subscribing
   // early would only fail with permission-denied. onAuthStateChanged (above) calls this
   // again the moment a session becomes available.
+  if(sessionEnding) return;
   if(!auth || !auth.currentUser){ setSync("Waiting to sign in…", false); return; }
   if(cloudSyncStarted) return;
   cloudSyncStarted = true;
@@ -1089,10 +1214,16 @@ function startCloud(){
   // what this caller is authorized to see. What's listened to here is just a tiny, non-
   // sensitive timestamp doc that gets bumped on every successful save; seeing it change is
   // the trigger to go fetch a fresh authorized view, not a source of data itself.
-  onSnapshot(META, { includeMetadataChanges: true }, snap=>{
+  metaUnsub = onSnapshot(META, { includeMetadataChanges: true }, snap=>{
+    if(sessionEnding) return;
     if(snap.metadata.hasPendingWrites) return; // ignore our own optimistic local echo, if any
     fetchAuthorizedData();
-  }, e=>setSync("Sync error — check network",true));
+  }, e=>{
+    // Signing out revokes this listener's auth, which Firestore reports as a permission error.
+    // That is the logout itself, not a sync failure — only report errors on a live session.
+    if(sessionEnding || !auth || !auth.currentUser) return;
+    setSync("Sync error — check network",true);
+  });
 }
 
 // Fetches this caller's authorized view via getAppData() and applies the same conflict-
@@ -1101,8 +1232,11 @@ function startCloud(){
 // json comes from (a server-filtered function result, not a raw document read).
 async function fetchAuthorizedData(){
   if(!getAppDataFn) return;
+  if(sessionEnding) return;
+  const gen = authGeneration;
   try{
     const result = await getAppDataFn();
+    if(gen !== authGeneration || sessionEnding) return; // response for a session that no longer exists
     const newJson = result.data.json;
     setSync("✓ Data Synchronized");
     if(newJson === lastCloudJson){ serverViewReceived = true; enforcePolicyGate(); return; }
@@ -1122,6 +1256,8 @@ async function fetchAuthorizedData(){
     if (isModalOpen()) { pendingRemoteJson = newJson; return; } // someone's mid-edit — hold this until they close it
     applyRemoteJson(newJson);
   }catch(e){
+    // Logout / forced logout while this request was in flight: expected, never an error toast.
+    if(isSessionEndError(e) || gen !== authGeneration || sessionEnding) return;
     // PART A (server hardening): a missing/outdated policy acceptance is not a network/sync
     // failure — show the gate, not an alarming "Sync error" toast, and use the minimal
     // policyVersions/policyAcceptances the server included specifically so this doesn't need
@@ -1141,6 +1277,9 @@ async function fetchAuthorizedData(){
       setSync("Policy acceptance required", false);
       return;
     }
+    // 401 on a live session: forceLogout() is already showing the session-expired message —
+    // keep it distinguishable from an ordinary network failure.
+    if(e && e.code === "functions/unauthenticated"){ setSync("Session expired — please log in again", true); return; }
     setSync("Sync error — check network", true);
   }
 }
@@ -1151,7 +1290,12 @@ let pendingRemoteJson = null;
 function applyRemoteJson(newJson){
   lastCloudJson = newJson;
   applyingRemote = true;
-  DB = {...DB,...JSON.parse(newJson)};
+  const view = JSON.parse(newJson);
+  // `dataScope` is a server-computed DESCRIPTOR (which people's Payments/Quotations this account may see), not data: keep it
+  // out of DB so it is never persisted to localStorage or echoed back to the server on save.
+  serverDataScope = view.dataScope && typeof view.dataScope === "object" ? view.dataScope : null;
+  delete view.dataScope;
+  DB = {...DB,...view};
   ensure(true); // safe to auto-fix + push now — this is the confirmed-fresh cloud copy, not a stale local one
   persistLocal();
   // This device is now caught up with the cloud — remember it as the base to compare
@@ -1184,6 +1328,7 @@ window.addEventListener('storage', (e) => {
 // flush any pending save through every one of these exit signals.
 function flushPendingSave(){
   if(!firebaseAvailable) return;
+  if(sessionEnding) return; // logging out: the token is being revoked, a save now can only fail
   if(writeTimer || isDirty){
     clearTimeout(writeTimer); writeTimer = null;
     const jsonStr = JSON.stringify(DB);
@@ -1289,7 +1434,10 @@ function mmDismissToast(t, ms){
   t.classList.add('mm-leave');
   setTimeout(()=>t.remove(), ms);
 }
-function toast(m){ const t=document.createElement("div"); t.className="toast"; t.innerHTML=`<i class="fas fa-check-circle" style="color:var(--primary);font-size:1.1rem"></i> `+m; document.body.appendChild(t); setTimeout(()=>mmDismissToast(t,180),2200); }
+// Single toast system. optional 2nd argument `kind` ("error"/"success", read via arguments[1] so the signature stays toast(m)); when omitted it is inferred from the wording, because ~40
+// call sites report validation/permission/network failures and used to show the same green check as a success. Errors get
+// their own icon, role=alert (announced) and stay longer. NOTE: kept as ONE self-contained line — tests extract it by regex.
+function toast(m){ const kind = arguments[1]; const isErr = kind ? kind === "error" : /\b(required|error|fail(?:ed|ure)?|invalid|denied|cannot|can't|couldn't|could not|unable|rejected|expired|offline|conflict|not allowed|must be|incorrect|try again|too (?:long|short|many|large|big)|no permission|not signed)\b/i.test(String(m).replace(/<[^>]*>/g, "")); const t=document.createElement("div"); t.className="toast" + (isErr ? " toast-error" : ""); t.setAttribute("role", isErr ? "alert" : "status"); t.innerHTML=(isErr ? `<i class="fas fa-exclamation-circle" aria-hidden="true" style="color:var(--danger);font-size:1.1rem"></i> ` : `<i class="fas fa-check-circle" aria-hidden="true" style="color:var(--primary);font-size:1.1rem"></i> `)+m; document.body.appendChild(t); setTimeout(()=>mmDismissToast(t,180), isErr ? 4500 : 2200); }
 let undoTimer=null;
 function showUndoToast(msg, undoFn){
   const old=document.getElementById("undoToast"); if(old) old.remove();
@@ -1301,12 +1449,13 @@ function showUndoToast(msg, undoFn){
   undoTimer=setTimeout(()=>{ mmDismissToast(t,180); },5000);
 }
 function setSync(txt,err){
+  if(err && sessionEnding) return; // never paint an error for the session we're intentionally ending
   const b=$("syncBar"); if(b){ b.textContent=txt; b.style.background=err?"var(--danger)":"var(--primary-gradient)"; if(!err&&txt==="✓ Data Synchronized") setTimeout(()=>b.classList.add("hidden"),1500); else b.classList.remove("hidden"); }
   if(!err && txt==="✓ Data Synchronized") localStorage.setItem("mm_last_sync", Date.now().toString());
   const dot = document.querySelector("#dashSyncStatus i");
   const label = $("dashSyncText");
   if(dot && label){
-    if(err){ dot.style.color = "var(--sync-dot-err)"; label.textContent = txt.includes("Local") ? "Offline — local only" : "Sync error"; }
+    if(err){ dot.style.color = "var(--sync-dot-err)"; label.textContent = txt.includes("Local") ? "Offline — local only" : txt.includes("Session") ? "Session expired" : "Sync error"; }
     else { dot.style.color = "var(--sync-dot-ok)"; label.textContent = "Synced " + timeAgo(Date.now()); }
   }
 }
@@ -1745,6 +1894,9 @@ function startSessionWatcher(){
   }, 60000);
 }
 window.forceLogout = (message) => {
+  // Several in-flight requests can each get a 401 at once — only the first one starts the
+  // teardown (and its message wins); the rest must not re-run it or fight over the reload.
+  if(!beginSessionTermination()) return;
   if(sessionWatcherId){ clearInterval(sessionWatcherId); sessionWatcherId = null; }
   sessionStorage.removeItem("mm_session"); sessionStorage.removeItem("mm_login_time");
   // FINDING #3 FIX: a forced logout (timeout/revocation/failed session restore) is not a
@@ -1870,6 +2022,7 @@ window.doLogin = async () => {
   }
 
   setLoginBtnState('loading', 'Verifying…');
+  beginSession();
   try{
     // login is verified by the Cloudflare Worker now (see LOGIN_ENDPOINT above), not a Firebase
     // callable — same server-side bcrypt check, same response shape ({ token, user }), so
@@ -1971,22 +2124,31 @@ function buildNav(){
     let sectionHtml = "";
     if(n.section !== lastSection){ sectionHtml = `<div class="nav-section-lbl">${esc(t(sectionKeyMap[n.section]||n.section))}</div>`; lastSection = n.section; }
     const label = I18N.en[n.id] ? t(n.id) : n.label;
-    return sectionHtml + `<div class="nav-item${n.id===activePage?' active':''}" data-tab="${esc(n.id)}" onclick="go(${sj(n.id)})"><i class="fas ${esc(n.icon)}"></i>${esc(label)}</div>`;
+    return sectionHtml + `<div class="nav-item${n.id===activePage?' active':''}" role="button" tabindex="0"${n.id===activePage?' aria-current="page"':''} data-tab="${esc(n.id)}" onclick="go(${sj(n.id)})"><i class="fas ${esc(n.icon)}"></i>${esc(label)}</div>`;
   }).join("");
 }
-function cleanMenuToggle() { if(window.innerWidth<=900) { const sb = document.querySelector('.sidebar'); if(sb) sb.classList.remove('open'); const bd=$("sidebarBackdrop"); if(bd) bd.style.display='none'; } }
+function cleanMenuToggle() { if(window.innerWidth<=900) { const sb = document.querySelector('.sidebar'); if(sb) sb.classList.remove('open'); const bd=$("sidebarBackdrop"); if(bd) bd.style.display='none'; syncMenuAria(false); } }
+function syncMenuAria(open){ const b=document.querySelector('.menu-btn'); if(!b) return; b.setAttribute('aria-expanded', open?'true':'false'); b.setAttribute('aria-label', open?'Close navigation menu':'Open navigation menu'); }
 window.toggleSidebar=()=>{
   const sb=document.querySelector('.sidebar'); const bd=$("sidebarBackdrop");
   const opening = !sb.classList.contains('open');
   sb.classList.toggle('open');
   if(bd) bd.style.display = opening ? 'block' : 'none';
+  syncMenuAria(opening);
 };
 window.closeSidebar=()=>{
   const sb=document.querySelector('.sidebar'); const bd=$("sidebarBackdrop");
   sb.classList.remove('open'); if(bd) bd.style.display='none';
+  syncMenuAria(false);
 };
+// Rotating a tablet / resizing past the mobile breakpoint with the menu open used to leave the
+// full-screen backdrop on top of the desktop layout, making the whole app unclickable.
+window.matchMedia('(max-width:900px)').addEventListener('change', e=>{ if(!e.matches) closeSidebar(); });
 window.go=id=>{
   if(id==="logout"){ 
+    // Mark the session as ending FIRST, synchronously, before anything below can trigger a
+    // request or a listener callback — see the "Session lifecycle guard" block near the top.
+    beginSessionTermination();
     sessionStorage.removeItem("mm_session"); sessionStorage.removeItem("mm_dismissed_alerts"); sessionStorage.removeItem("mm_login_time");
     // See clearSensitiveLocalCaches() (Finding #3): the cached business dataset, undo
     // snapshots, and last-authorized-response cache are all cleared here — and by
@@ -2059,6 +2221,10 @@ function topbar(title){
   $("sidebarRole").textContent = currentUser.role;
 }
 
+function setDocTitle(){
+  const n = NAV.find(x=>x.id===activePage) || (DB.customSections||[]).find(cs=>cs.id===activePage);
+  document.title = (n && n.label ? n.label + " · " : "") + "MoneyMatrix";
+}
 function render(){
   // Mandatory policy gate (PART A): while active, no page but Privacy Center itself may render —
   // this is what actually stops sidebar clicks, direct activePage changes, a stale deep link, or
@@ -2077,11 +2243,15 @@ function render(){
   const customSection = (DB.customSections||[]).find(cs=>cs.id===activePage);
   if(customSection){
     if(!canView(activePage)) { activePage = "dashboard"; return render(); }
+    setDocTitle();
     topbar(customSection.label);
     renderCustomSection(customSection);
     return;
   }
 
+  // Section-aware tab title (history / task switcher / PWA window). Set AFTER every guard above has
+  // settled activePage, so a gated or unauthorised user's title never names a page they can't see.
+  setDocTitle();
   const map={dashboard:renderDash,marathon:renderMarathon,club:renderClub,coaches:renderCoaches,supervisors:renderSupervisors,gifts:renderGifts,products:renderProducts,quotations:renderQuotations,worldteam:()=>renderRankSection('worldteam'),getteam:()=>renderRankSection('getteam'),milteam:()=>renderRankSection('milteam'),presteam:()=>renderRankSection('presteam'),backup:renderBackup,admin:renderAdmin,permissions:renderPermissions,individualaccess:renderIndividualAccess,sectionmanager:renderSectionManager,profile:renderProfile,settings:renderSettings,privacy:renderPrivacyCenter};
   const titles={dashboard:"Dashboard Overview",marathon:"Payments",club:"Club Membership",coaches:"Club Coaches",supervisors:"Supervisors",gifts:"Gifts & Rewards",products:"Products",quotations:"Quotations",worldteam:"World Team",getteam:"GET Team",milteam:"Millionaire Team",presteam:"President's Team",backup:"Data Management",admin:"User Management",permissions:"Access Control Manager",individualaccess:"Individual Access",sectionmanager:"Custom Sections",profile:"My Profile",settings:"Account Settings",privacy:"Privacy Center"};
   const translatedTitle = I18N.en[activePage] ? t(activePage) : (titles[activePage]||"Dashboard");
@@ -2099,7 +2269,7 @@ window.dismissSingleAlert = (alertId) => {
 window.openWhatsApp = (phone, msg) => {
   if(!phone || phone.trim() === "-" || phone.trim() === "") return toast("No phone number saved for this user.");
   let p = phone.replace(/[^0-9]/g, ''); if(p.length === 10) p = "91" + p; 
-  window.open(`https://wa.me/${p}?text=${encodeURIComponent(msg)}`, '_blank');
+  window.open(`https://wa.me/${p}?text=${encodeURIComponent(msg)}`, '_blank', 'noopener,noreferrer');
 };
 
 window.quickToggleDark=()=>{
@@ -2340,6 +2510,8 @@ function renderDash(){
 }
 
 /* ===== Marathon Payments ===== */
+window.setMaraScope=v=>{ maraScope=v; renderMarathonResults(); };
+window.setMaraStatus=v=>{ maraStatus=paymentStatusKey(v); renderMarathonResults(); };
 let maraSearch="",marathonFilter="all";
 window.setMaraSearch=v=>{ maraSearch=v.toLowerCase(); renderMarathonResults(); };
 window.setMaraFilter=v=>{ marathonFilter=v; renderMarathonResults(); };
@@ -2359,6 +2531,59 @@ function computePaymentTotals(transactions){
   });
   return totals;
 }
+/* ===== Data Scope + payment-status filtering =====
+   The SERVER decides whose Payments/Quotations this account may see (resolveDataScope in the Worker, from the verified
+   identity + stored hierarchy) and sends only those records, plus a `dataScope` descriptor. Everything below only NARROWS
+   what was already authorized and can never widen it. Pipeline:  authorized data (server) -> scope -> payment status.
+   The totals cards deliberately keep using the full authorized set, so they do not move when these filters change. */
+let serverDataScope = null;               // null in local/offline mode and before the first sync: no server scope exists
+const SCOPE_LABELS = { all:"All Data", mine_downline:"My Data + Downline", mine:"My Data", downline:"My Downline" };
+let maraScope = null, maraStatus = "all", quoteScope = null;
+const PAYMENT_STATUS_OPTIONS = [["all","All"],["pending","Pending"],["completed","Completed"]];
+function effectiveScopeKey(ds, chosen){ if(!ds || !Array.isArray(ds.allowed)) return null; return ds.allowed.includes(chosen) ? chosen : ds.default; }
+// Set of owner ids; null = "no owner restriction" (superadmin's All Data); undefined = key not allowed (callers fail closed)
+function scopeOwnerSet(ds, key){
+  if(!ds || !Array.isArray(ds.allowed) || !ds.allowed.includes(key)) return undefined;
+  if(key === "all") return null;
+  const ids = ds.owners && ds.owners[key];
+  return Array.isArray(ids) ? new Set(ids) : undefined;
+}
+function filterRecordsByOwner(records, owners){
+  if(owners === null) return records;
+  if(!owners) return [];
+  return records.filter(r => r && typeof r.ownerId === "string" && owners.has(r.ownerId));
+}
+// Only the two real statuses filter; an unknown FILTER value is treated as "all", and a record whose own status is
+// anything else (legacy / blank / unexpected) appears under "All" only. Never changes stored data.
+function paymentStatusKey(v){ return v === "pending" || v === "completed" ? v : "all"; }
+function filterPaymentsByStatus(records, filter){ const k = paymentStatusKey(filter); return k === "all" ? records : records.filter(r => r && r.status === k); }
+// Records for a collection within the chosen scope. Shared storage: records carry ownerId. Per-user storage: ownership is
+// the bucket a record lives in, and other people's buckets are shown read-only (flagged __foreign on a copy).
+function scopedRecords(coll, chosen){
+  const ds = serverDataScope, d = data();
+  if(!ds) return d[coll] || [];
+  const owners = scopeOwnerSet(ds, effectiveScopeKey(ds, chosen));
+  // NB viewingAs is set to the user's OWN id at login; it only means "viewing someone else" when it differs from it.
+  const me = currentUser && currentUser.id, viewingOther = !!viewingAs && viewingAs !== me;
+  if(DB.settings.dataSharing || viewingOther) return filterRecordsByOwner(d[coll] || [], owners);
+  const out = [];
+  const ids = owners === null ? Object.keys(DB.perUser || {}) : [...(owners || [])];
+  for(const id of ids){
+    const list = (DB.perUser && DB.perUser[id] && DB.perUser[id][coll]) || [];
+    if(id === me) out.push(...list); else for(const r of list) out.push({ ...r, __foreign:true });
+  }
+  return out;
+}
+function scopeControlHtml(idPrefix, chosen, handler){
+  const ds = serverDataScope; if(!ds || !Array.isArray(ds.allowed) || !ds.allowed.length) return "";
+  const key = effectiveScopeKey(ds, chosen);
+  if(ds.allowed.length === 1) return `<div class="filter-field"><span class="fl">Data Scope</span><div class="scope-chip" id="${idPrefix}_scope">${esc(SCOPE_LABELS[key] || key)}</div></div>`;
+  return `<div class="filter-field"><label class="fl" for="${idPrefix}_scope">Data Scope</label><select id="${idPrefix}_scope" onchange="${handler}(this.value)">${ds.allowed.map(k => `<option value="${esc(k)}"${k===key?" selected":""}>${esc(SCOPE_LABELS[k] || k)}</option>`).join("")}</select></div>`;
+}
+function scopeNoteText(chosen, shown, total, noun, extra){
+  const key = effectiveScopeKey(serverDataScope, chosen);
+  return `Data Scope: ${SCOPE_LABELS[key] || key}${extra||""} · Showing ${shown} of ${total} ${noun}`;
+}
 function paymentTotalsHtml(transactions){
   const T = computePaymentTotals(transactions);
   const card = (icon, cls, val, lbl) => `<div class="stat"><div class="stat-ic ${cls}"><i class="fas ${icon}"></i></div><div class="stat-info"><div class="stat-val">${money(val)}</div><div class="stat-lbl">${lbl}</div></div></div>`;
@@ -2376,18 +2601,25 @@ function renderMarathon(){
     <div class="card">
       <div class="card-head"><span class="card-title">${t('transactionHistory')}</span>${writeBtn}</div>
       <div class="filter-row">
-        <input id="search_marathon" class="search" placeholder="${t('searchRecords')}" value="${esc(maraSearch)}" oninput="setMaraSearch(this.value)">
+        ${scopeControlHtml('mara', maraScope, 'setMaraScope')}
+        <div class="filter-field"><label class="fl" for="mara_status">Payment Status</label><select id="mara_status" onchange="setMaraStatus(this.value)">${PAYMENT_STATUS_OPTIONS.map(([k,l])=>`<option value="${k}"${paymentStatusKey(maraStatus)===k?' selected':''}>${l}</option>`).join("")}</select></div>
+        <input id="search_marathon" class="search" aria-label="Search payments" placeholder="${t('searchRecords')}" value="${esc(maraSearch)}" oninput="setMaraSearch(this.value)">
         <select onchange="setMaraFilter(this.value)"><option value="all"${marathonFilter==='all'?' selected':''}>${t('allTypes')}</option><option value="received"${marathonFilter==='received'?' selected':''}>Received (Credit)</option><option value="sent"${marathonFilter==='sent'?' selected':''}>Sent (Debit)</option></select>
       </div>
+      <div class="scope-note" id="marathon_scope_note" role="status" aria-live="polite"></div>
       <div class="tbl-wrap" id="marathon_results"></div>
     </div>`;
   renderMarathonResults();
 }
 function renderMarathonResults(){
   const d=data();
-  let rows=[...d.transactions].sort((a,b)=>new Date(b.date || 0).getTime()-new Date(a.date || 0).getTime());
+  // authorized (server) -> scope -> payment status; the existing type filter and search follow, unchanged.
+  const inScope=scopedRecords('transactions', maraScope);
+  let rows=[...filterPaymentsByStatus(inScope, maraStatus)].sort((a,b)=>new Date(b.date || 0).getTime()-new Date(a.date || 0).getTime());
   if(marathonFilter!=="all") rows=rows.filter(t=>t.type===marathonFilter || (!t.type && marathonFilter==='received'));
   if(maraSearch) rows=rows.filter(t=>(t.customer||"").toLowerCase().includes(maraSearch)||(t.product||"").toLowerCase().includes(maraSearch));
+  const note=$("marathon_scope_note");
+  if(note) note.textContent = serverDataScope ? scopeNoteText(maraScope, rows.length, inScope.length, "payments", paymentStatusKey(maraStatus)!=="all" ? ` · Status: ${paymentStatusKey(maraStatus)==="pending"?"Pending":"Completed"}` : "") + ". Totals above cover everything you are authorized to see." : "";
   const el=$("marathon_results"); if(!el) return;
   el.innerHTML = rows.length?
         `<table><thead><tr><th>Date</th><th>Customer</th><th>Product/Note</th><th>Type</th><th>Amount</th><th>Status</th>${canWrite('marathon')?'<th>Actions</th>':''}</tr></thead><tbody>`+
@@ -2398,7 +2630,7 @@ function renderMarathonResults(){
           <td data-label="Type"><span class="badge ${tx.type==='sent'?'bg-red':'bg-green'}">${tx.type==='sent'?'Sent (Debit)':'Received (Credit)'}</span></td>
           <td data-label="Amount" style="font-weight:800;font-size:1.05rem;color:${tx.type==='sent'?'#dc2626':'#059669'}">${tx.type==='sent'?'-':'+'}${money(tx.amount)}</td>
           <td data-label="${t('status')}"><span class="badge ${tx.status==='completed'?'bg-gray':'bg-amber'}">${tx.status}</span></td>
-          ${canWrite('marathon')?`<td data-label="${t('actions')}"><button class="btn btn-sm btn-gray" onclick='txModal(${sj(tx)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('transactions',${sj(tx.id)})"><i class="fas fa-trash"></i></button></td>`:''}
+          ${canWrite('marathon') && tx.__foreign ? `<td data-label="${t('actions')}"><span class="badge bg-gray" title="Recorded in another user's data">View only</span></td>` : canWrite('marathon')?`<td data-label="${t('actions')}"><button class="btn btn-sm btn-gray" onclick='txModal(${sj(tx)})'><i class="fas fa-pen"></i></button> <button class="btn btn-sm btn-red" onclick="delItem('transactions',${sj(tx.id)})"><i class="fas fa-trash"></i></button></td>`:''}
         </tr>`).join("")+`</tbody></table>` : `<div class="empty"><i class="fas fa-running"></i>No payments logged</div>`;
 }
 /* ---- Client selector (Marathon Payment "Client" field) ----
@@ -2884,7 +3116,7 @@ window.memberModal=(m={})=>{
   <div class="form-group"><label>Phone</label><input id="m_phone" value="${esc(m.phone||"")}" oninput="checkDuplicatePhone(this.value,'m','${m.id||""}')"></div>
   <div class="phone-warn hidden" id="m_phone_warn"></div>
   <div class="form-group"><label>Email</label><input id="m_email" value="${esc(m.email||"")}"></div>
-  <div style="display:flex;gap:15px;flex-wrap:wrap">
+  <div class="form-row">
     <div class="form-group" style="flex:1;min-width:180px"><label>Club Coach</label><select id="m_coach" onchange="autoSelectSup(this.value)"><option value="">-- Select Coach --</option>${m.coachName && !m.coachId ? `<option value="" disabled selected>${esc(m.coachName)}</option>` : ''}${coaches.map(c=>`<option value="${c.id}" ${m.coachId===c.id?'selected':''}>${esc(c.name)}</option>`).join("")}${supervisors.length?`<optgroup label="Supervisor acting directly as Coach">${supervisors.map(s=>`<option value="sup_${s.id}" ${m.coachIsSupervisor && m.coachId===s.id?'selected':''}>${esc(s.name)}</option>`).join("")}</optgroup>`:''}</select><div style="font-size:.72rem;color:var(--text-muted);margin-top:6px;line-height:1.4">No dedicated coach for this member? Pick their Supervisor here instead — the Supervisor field below fills in automatically.</div></div>
     <div class="form-group" style="flex:1;min-width:180px"><label>Supervisor</label><select id="m_sup"><option value="">-- Select Supervisor --</option>${m.supervisorName && !m.supervisorId ? `<option value="" disabled selected>${esc(m.supervisorName)}</option>` : ''}${supervisors.map(s=>`<option value="${s.id}" ${m.supervisorId===s.id?'selected':''}>${esc(s.name)}</option>`).join("")}</select></div>
   </div>
@@ -3582,12 +3814,17 @@ window.saveProduct=id=>{
 let quoteSearch="";
 let quoteLineItems=[];
 window.setQuoteSearch=v=>{ quoteSearch=v.toLowerCase(); renderQuotationsResults(); };
+window.setQuoteScope=v=>{ quoteScope=v; renderQuotationsResults(); };
 function renderQuotations(){
   const writeBtn = canWrite('quotations') ? `<button class="btn btn-primary" onclick="quotationModal()"><i class="fas fa-plus"></i> New Quotation</button>` : '';
   const accessBtn = isSuperAdmin() ? `<button class="btn btn-gray" onclick="manageQuotationAccess()"><i class="fas fa-user-shield"></i> Manage Access</button>` : '';
   $("pageBody").innerHTML=switcher()+`
     <div class="card"><div class="card-head"><span class="card-title">Quotations</span><div style="display:flex;gap:10px">${accessBtn}${writeBtn}</div></div>
-      <input id="search_quotations" class="search" placeholder="Search by customer name..." value="${esc(quoteSearch)}" oninput="setQuoteSearch(this.value)">
+      <div class="filter-row">
+        ${scopeControlHtml('quote', quoteScope, 'setQuoteScope')}
+        <input id="search_quotations" class="search" aria-label="Search quotations" placeholder="Search by customer name..." value="${esc(quoteSearch)}" oninput="setQuoteSearch(this.value)">
+      </div>
+      <div class="scope-note" id="quotations_scope_note" role="status" aria-live="polite"></div>
       <div class="tbl-wrap" id="quotations_results"></div>
     </div>`;
   renderQuotationsResults();
@@ -3601,8 +3838,13 @@ window.manageQuotationAccess = () => {
   showModal(manageSectionAccessHtml('quotations', 'Quotations & Invoices', 'This also covers generated invoices — an invoice here is a quotation with an invoice number assigned, not a separate record. Unauthorized users cannot view quotation/invoice data, including via direct data access, which the server also enforces.'));
 };
 function renderQuotationsResults(){
-  const d=data(); let rows=[...(d.quotations||[])].sort((a,b)=>new Date(b.date||0).getTime()-new Date(a.date||0).getTime());
+  // authorized (server) -> scope; the existing search follows, unchanged.
+  const inScope=scopedRecords('quotations', quoteScope);
+  let rows=[...inScope].sort((a,b)=>new Date(b.date||0).getTime()-new Date(a.date||0).getTime());
+  const totalInScope=rows.length;
   if(quoteSearch) rows=rows.filter(q=>(q.customerName||"").toLowerCase().includes(quoteSearch));
+  const note=$("quotations_scope_note");
+  if(note) note.textContent = serverDataScope ? scopeNoteText(quoteScope, rows.length, totalInScope, "quotations") : "";
   const el=$("quotations_results"); if(!el) return;
   el.innerHTML = rows.length ?
     `<table><thead><tr><th>Date</th><th>Customer</th><th>Items</th><th>Total</th>${canWrite('quotations')?`<th>${t('actions')}</th>`:''}</tr></thead><tbody>`+
@@ -3611,7 +3853,7 @@ function renderQuotationsResults(){
       <td data-label="Customer"><div style="display:flex;gap:10px;align-items:flex-start">${avatarChip(q.customerName)}<div><div style="font-weight:700;color:var(--text)">${esc(dispName(q.customerName))}</div>${q.lastEditedBy?`<div style="font-size:.7rem;color:var(--text-muted);margin-top:4px"><i class="fas fa-user-edit" style="font-size:.65rem;margin-right:3px"></i>${esc(q.lastEditedBy)}</div>`:''}</div></div></td>
       <td data-label="Items">${(q.items||[]).length} item${(q.items||[]).length===1?'':'s'}</td>
       <td data-label="Total" style="font-weight:700;color:var(--primary)">${money(q.grandTotal||0)}${q.invoiceNumber?`<div style="font-size:.68rem;font-weight:700;color:var(--text-muted);margin-top:3px;text-transform:none"><i class="fas fa-file-invoice" style="margin-right:3px"></i>${esc(q.invoiceNumber)}</div>`:''}</td>
-      ${canWrite('quotations')?`<td data-label="${t('actions')}">
+      ${canWrite('quotations') && q.__foreign ? `<td data-label="${t('actions')}"><span class="badge bg-gray" title="Recorded in another user's data">View only</span></td>` : canWrite('quotations')?`<td data-label="${t('actions')}">
         <button class="btn btn-sm btn-gray" onclick="exportQuotationPDF(${sj(q.id)},this)" title="Export Quotation PDF"><i class="fas fa-file-pdf"></i></button>
         <button class="btn btn-sm btn-blue" onclick="exportInvoicePDF(${sj(q.id)},this)" title="${q.invoiceNumber?'Re-export Invoice':'Generate Invoice'}"><i class="fas fa-file-invoice-dollar"></i></button>
         <button class="btn btn-sm btn-gray" onclick='quotationModal(${sj(q)})'><i class="fas fa-pen"></i></button>
@@ -3631,13 +3873,13 @@ window.quotationModal=(q={})=>{
   showModal(`
     <div class="modal-head"><h3>${q.id?"Edit":"New"} Quotation</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
     <div class="form-group"><label>Pick an Existing Member (optional)</label><select id="q_member_select" onchange="selectQuoteMember(this.value)"><option value="">-- Or type a name manually below --</option>${members.map(m=>`<option value="${m.id}"${q.memberId===m.id?' selected':''}>${esc(m.name)}${m.phone?` (${esc(m.phone)})`:''}</option>`).join("")}</select></div>
-    <div style="display:flex;gap:15px;flex-wrap:wrap">
+    <div class="form-row">
       <div class="form-group" style="flex:1;min-width:160px"><label>Customer Name</label><input id="q_customer" value="${esc(q.customerName||"")}" placeholder="Who is this quote for?"></div>
       <div class="form-group" style="flex:1;min-width:140px"><label>Phone (optional)</label><input id="q_phone" value="${esc(q.customerPhone||"")}"></div>
     </div>
     <input type="hidden" id="q_memberId" value="${esc(q.memberId||"")}">
     <input type="hidden" id="q_showDiscount" value="${q.showDiscount===false?'0':'1'}">
-    <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:flex-end">
+    <div class="form-row">
       <div class="form-group" style="flex:1;min-width:160px"><label>Date</label><input id="q_date" type="date" value="${q.date?new Date(q.date).toISOString().slice(0,10):new Date().toISOString().slice(0,10)}"></div>
       <div class="form-group" style="min-width:200px">
         <label>Discount on Quotation</label>
@@ -3647,13 +3889,13 @@ window.quotationModal=(q={})=>{
         </div>
       </div>
     </div>
-    <div style="margin:16px 0 8px;font-weight:700;font-size:.78rem;color:var(--text-muted);text-transform:uppercase">Line Items</div>
+    <div class="quote-lines-head" id="quoteLinesHead">Line Items</div>
     <div id="quoteItemsWrap"></div>
     <button type="button" class="btn btn-gray" style="width:100%;margin-top:10px" onclick="addQuoteLine()"><i class="fas fa-plus"></i> Add Item</button>
     <div id="quoteTotals" style="margin-top:16px"></div>
     <div class="form-group" style="margin-top:16px"><label>Notes</label><textarea id="q_notes">${esc(q.notes||"")}</textarea></div>
     <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveQuotation(${sj(q.id||"")})'>Save Quotation</button></div>
-  `);
+  `, { wide:true });
   if(!quoteLineItems.length) addQuoteLine(); else renderQuoteItems();
 };
 window.setQuoteShowDiscount=(show)=>{
@@ -3676,29 +3918,29 @@ function renderQuoteItems(){
   const d=data(); const products=d.products||[];
   const wrap=$("quoteItemsWrap"); if(!wrap) return;
   wrap.innerHTML = quoteLineItems.map((item,i)=>`
-    <div class="quote-line-row">
-      <div class="qlf qlf-product"><label>Product</label>
-        <select onchange="updateQuoteLine(${i},'productId',this.value)">
+    <div class="quote-line-row" role="group" aria-label="Line item ${i+1}">
+      <div class="qlf qlf-product"><label for="qi_prod_${i}">Product</label>
+        <select id="qi_prod_${i}" onchange="updateQuoteLine(${i},'productId',this.value)">
           <option value="">-- Custom Item --</option>
           ${products.map(p=>`<option value="${p.id}"${item.productId===p.id?' selected':''}>${esc(p.name)}</option>`).join("")}
         </select>
       </div>
-      <div class="qlf qlf-name"><label>Item Name</label>
+      <div class="qlf qlf-name"><label for="qi_name_${i}">Item Name</label>
         <input id="qi_name_${i}" value="${esc(item.productName||"")}" placeholder="Type the item's name" oninput="updateQuoteLine(${i},'productName',this.value)">
       </div>
-      <div class="qlf qlf-qty"><label>Qty</label>
-        <input type="number" value="${item.qty||1}" min="0" oninput="updateQuoteLine(${i},'qty',this.value)">
+      <div class="qlf qlf-qty"><label for="qi_qty_${i}">Qty</label>
+        <input id="qi_qty_${i}" type="number" inputmode="decimal" value="${item.qty||1}" min="0" oninput="updateQuoteLine(${i},'qty',this.value)">
       </div>
-      <div class="qlf qlf-price"><label>Price</label>
-        <input id="qi_price_${i}" type="number" value="${item.price||0}" oninput="updateQuoteLine(${i},'price',this.value)">
+      <div class="qlf qlf-price"><label for="qi_price_${i}">Price</label>
+        <input id="qi_price_${i}" type="number" inputmode="decimal" value="${item.price||0}" oninput="updateQuoteLine(${i},'price',this.value)">
       </div>
-      <div class="qlf qlf-disc"><label>Disc %</label>
-        <input type="number" value="${item.discountPercent||0}" oninput="updateQuoteLine(${i},'discountPercent',this.value)">
+      <div class="qlf qlf-disc"><label for="qi_disc_${i}">Disc %</label>
+        <input id="qi_disc_${i}" type="number" inputmode="decimal" value="${item.discountPercent||0}" min="0" max="100" oninput="updateQuoteLine(${i},'discountPercent',this.value)">
       </div>
-      <div class="qlf qlf-total"><label>Total</label>
-        <div id="lineTotal_${i}" class="qlf-total-val">${money(lineTotal(item))}</div>
+      <div class="qlf qlf-total"><div class="qlf-label" id="qi_totlbl_${i}">Total</div>
+        <div id="lineTotal_${i}" class="qlf-total-val" role="status" aria-labelledby="qi_totlbl_${i}">${money(lineTotal(item))}</div>
       </div>
-      <div class="qlf-del"><button type="button" class="btn btn-sm btn-red" onclick="removeQuoteLine(${i})"><i class="fas fa-trash"></i></button></div>
+      <div class="qlf qlf-del"><button type="button" class="btn btn-sm btn-red" onclick="removeQuoteLine(${i})" aria-label="Remove item ${i+1}" title="Remove item"><i class="fas fa-trash" aria-hidden="true"></i><span class="qlf-del-text">Remove item</span></button></div>
     </div>
   `).join("");
   renderQuoteTotals();
@@ -3727,10 +3969,10 @@ function renderQuoteTotals(){
   const subtotal=quoteLineItems.reduce((s,it)=>s+((+it.qty||0)*(+it.price||0)),0);
   const totalDiscount=quoteLineItems.reduce((s,it)=>s+((+it.qty||0)*(+it.price||0))*((+it.discountPercent||0)/100),0);
   const grandTotal=subtotal-totalDiscount;
-  el.innerHTML=`<div style="border-top:1px solid var(--border);padding-top:12px;display:flex;flex-direction:column;gap:6px">
-    <div style="display:flex;justify-content:space-between;font-size:.85rem;color:var(--text-muted)"><span>Subtotal</span><span>${money(subtotal)}</span></div>
-    <div style="display:flex;justify-content:space-between;font-size:.85rem;color:var(--text-muted)"><span>Total Discount</span><span>-${money(totalDiscount)}</span></div>
-    <div style="display:flex;justify-content:space-between;font-size:1.1rem;font-weight:800;color:var(--text)"><span>Grand Total</span><span>${money(grandTotal)}</span></div>
+  el.innerHTML=`<div class="quote-totals">
+    <div><span>Subtotal</span><span>${money(subtotal)}</span></div>
+    <div><span>Total Discount</span><span>-${money(totalDiscount)}</span></div>
+    <div class="quote-grand"><span>Grand Total</span><span>${money(grandTotal)}</span></div>
   </div>`;
 }
 window.saveQuotation=id=>{
@@ -5136,6 +5378,33 @@ function policiesNeedingAcceptance(){
 function policyGateActive(){
   return !!(firebaseAvailable && currentUser && serverViewReceived && policiesNeedingAcceptance().length);
 }
+// Most forms here are written as <label>Text</label><input id="..."> with no for=, so screen readers
+// and tap-to-focus don't connect the two. This associates each orphan label with the control that
+// immediately follows it (or is inside the immediately following wrapper). It never touches a label
+// that already has for= / wraps its control, never re-uses a control another label already targets,
+// and skips hidden / aria-hidden / tabindex=-1 controls (e.g. the PIN capture input behind the OTP boxes).
+let mmLabelSeq = 0;
+function mmAssociateLabels(root){
+  (root || document).querySelectorAll('label:not([for])').forEach(l=>{
+    if(l.querySelector('input,select,textarea')) return;
+    const n = l.nextElementSibling; if(!n) return;
+    const ctl = n.matches('input,select,textarea') ? n : n.querySelector('input:not([type=hidden]),select,textarea');
+    if(!ctl || ctl.type==='hidden' || ctl.getAttribute('aria-hidden')==='true' || ctl.tabIndex===-1) return;
+    if(!ctl.id) ctl.id = 'mm_f_' + (++mmLabelSeq);
+    if((root||document).querySelector('label[for="'+ctl.id+'"]') || document.querySelector('label[for="'+ctl.id+'"]')) return;
+    l.htmlFor = ctl.id;
+  });
+}
+{ let pending=false;
+  new MutationObserver(()=>{ if(pending) return; pending=true; requestAnimationFrame(()=>{ pending=false; try{ if(document.body && document.defaultView) mmAssociateLabels(document.body); }catch(e){ /* document torn down mid-frame — nothing to label */ } }); })
+    .observe(document.body,{childList:true,subtree:true});
+  mmAssociateLabels(document.body); }
+// Turns e-mail addresses in already-ESCAPED text into mailto: links. Input must be esc()'d first; the
+// pattern only matches [A-Za-z0-9._%+-]@[A-Za-z0-9.-]+ so nothing that could break out of an attribute
+// or tag can ever be inside a match.
+function linkifyEmails(escapedHtml){
+  return escapedHtml.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g, m => `<a href="mailto:${m}">${m}</a>`);
+}
 window.viewPolicy = (type) => {
   const policy = POLICY_CONTENT[type];
   if(!policy) return;
@@ -5149,7 +5418,7 @@ window.viewPolicy = (type) => {
   else if(!isPolicyPublished(type)) action = `<span style="font-size:.8rem;color:var(--text-muted);align-self:center">This version hasn't been published by an administrator yet, so it can't be accepted right now.</span>`;
   else action = `<button class="btn btn-primary" onclick="acceptPolicy(${sj(type)}, this)"><i class="fas fa-check"></i> I Accept This Version</button>`;
   showModal(`<div class="modal-head"><h3>${esc(policy.title)} <span style="font-size:.75rem;color:var(--text-muted)">v${esc(policy.version)}</span></h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
-    <div style="max-height:55vh;overflow:auto;white-space:pre-wrap;font-size:.85rem;line-height:1.6;padding-right:6px">${esc(policy.body)}</div>
+    <div style="max-height:55vh;overflow:auto;white-space:pre-wrap;font-size:.85rem;line-height:1.6;padding-right:6px;overflow-wrap:anywhere">${linkifyEmails(esc(policy.body))}</div>
     <div class="modal-btns">
       <button class="btn btn-gray" onclick="closeModal()">Close</button>
       ${action}
@@ -5809,7 +6078,16 @@ window.performDeleteCustom = (sectionId, id) => {
 // remove or cover it.
 function showModal(html, opts){
   if(policyGateActive() && !(opts && opts.allowDuringGate)){ enforcePolicyGate(); return; }
-  $("modalRoot").innerHTML=`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal">${html}</div></div>`;
+  const root=$("modalRoot");
+  // Remember what had focus so closing the dialog can hand it back (keyboard / screen-reader users).
+  if(!root.querySelector('.modal-bg')) window.__mmModalReturnFocus = document.activeElement;
+  root.innerHTML=`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal${opts && opts.wide ? ' modal-wide' : ''}" role="dialog" aria-modal="true" tabindex="-1">${html}</div></div>`;
+  const dlg=root.querySelector('.modal');
+  const title=dlg && dlg.querySelector('.modal-head h3');
+  if(title){ title.id = "mmModalTitle"; dlg.setAttribute("aria-labelledby","mmModalTitle"); }
+  dlg && dlg.querySelectorAll('.modal-close').forEach(b=>{ if(!b.getAttribute('aria-label')) b.setAttribute('aria-label','Close dialog'); });
+  document.documentElement.classList.add('mm-modal-open'); // background page must not scroll behind a modal
+  if(dlg) dlg.focus({preventScroll:true});
 }
 /* ===== Generic animated confirm modal (Priority 3) =====
    Replaces native confirm() with the app's existing showModal/closeModal system so the
@@ -5837,6 +6115,9 @@ window.closeModal=()=>{
   const bg = root && root.querySelector('.modal-bg');
   const finish = () => {
     root.innerHTML="";
+    document.documentElement.classList.remove('mm-modal-open');
+    const rf = window.__mmModalReturnFocus; window.__mmModalReturnFocus = null;
+    if(rf && rf.isConnected && typeof rf.focus === "function"){ try{ rf.focus({preventScroll:true}); }catch(e){} }
     // A cloud update may have arrived while this form was open and was held back so it
     // couldn't overwrite the in-progress edit — apply it now that the form is closed.
     if(pendingRemoteJson && !isDirty){
@@ -5849,7 +6130,25 @@ window.closeModal=()=>{
   setTimeout(finish, 150);
 };
 document.addEventListener('keydown', e=>{
-  if(e.key==="Escape"){ const root=$("modalRoot"); if(root && root.querySelector('.modal-bg')) closeModal(); }
+  const root=$("modalRoot");
+  if(e.key==="Escape"){
+    if(root && root.querySelector('.modal-bg')){ closeModal(); return; }
+    const sb=document.querySelector('.sidebar');
+    if(sb && sb.classList.contains('open')){ closeSidebar(); const mb=document.querySelector('.menu-btn'); if(mb) mb.focus(); }
+    return;
+  }
+  // Nav items are <div role=button>: give them native-button keyboard behaviour.
+  if((e.key==="Enter" || e.key===" ") && e.target && e.target.classList && e.target.classList.contains('nav-item')){ e.preventDefault(); e.target.click(); return; }
+  // Keep Tab inside an open dialog so focus can't wander onto the page behind it.
+  if(e.key==="Tab" && root){
+    const dlg=root.querySelector('.modal'); if(!dlg) return;
+    const f=[...dlg.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(el=>el.offsetParent!==null);
+    if(!f.length) return;
+    const first=f[0], last=f[f.length-1];
+    if(e.shiftKey && (document.activeElement===first || document.activeElement===dlg)){ e.preventDefault(); last.focus(); }
+    else if(!e.shiftKey && document.activeElement===last){ e.preventDefault(); first.focus(); }
+    else if(!dlg.contains(document.activeElement)){ e.preventDefault(); first.focus(); }
+  }
 });
 
 /* ===== Start ===== */
@@ -5870,6 +6169,7 @@ if(sess && isSessionExpired()){
     document.documentElement.classList.remove("authed");
     // Firebase's own session doesn't know about our 2-hour rule on its own — make sure a
     // reload after the timeout can't silently pull cloud data back in behind the login screen.
+    beginSessionTermination();
     if(auth && signOut){ signOut(auth).catch(()=>{}); }
     initBiometricLoginButton();
     prefillRememberedCreds();

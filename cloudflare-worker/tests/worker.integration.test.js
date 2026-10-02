@@ -673,3 +673,437 @@ test("CORS: a disallowed origin gets no Access-Control-Allow-Origin header", asy
   const resp = await worker.fetch(new Request("https://worker.example/login", { method: "OPTIONS", headers: { Origin: "https://evil.example" } }), env, {});
   assert.equal(resp.headers.get("Access-Control-Allow-Origin"), null);
 });
+
+// ---------------------------------------------------------------------------------------------
+// SECTION AUTHORIZATION through the real HTTP handlers (Products / Quotations+invoices / Payments).
+// Identity is the verified token + the server-stored users record; nothing in the request body,
+// headers or any client-side state decides access.
+// ---------------------------------------------------------------------------------------------
+async function sectionEnv({ permissions, userPermissions } = {}) {
+  const { privateKey, publicJwk, kid } = await generateSecuretokenKeyPair();
+  const env = makeEnv({
+    users: [
+      { id: "sa", username: "sa", role: "superadmin", linkedId: null },
+      { id: "adm", username: "adm", role: "admin", linkedId: null },
+      { id: "u1", username: "u1", role: "user", linkedId: "supA" },
+    ],
+  });
+  Object.assign(env.__state.appData, {
+    permissions: permissions || { superadmin: {}, admin: {}, user: { marathon: "write" } },
+    userPermissions: userPermissions || {},
+    shared: {
+      supervisors: [{ id: "supA" }], members: [{ id: "m1", supervisorId: "supA" }], coaches: [], gifts: [], clients: [],
+      products: [{ id: "p1", name: "TOP-SECRET-PRODUCT" }],
+      quotations: [{ id: "q1", customerName: "SECRET-CUSTOMER", invoiceNumber: "INV-SECRET-9", ownerId: "u1" }],
+      transactions: [{ id: "t1", customer: "PAYER", amount: 100, ownerId: "u1" }],
+    },
+    perUser: {},
+  });
+  installFakeFetch(env, publicJwk);
+  const tokenFor = (uid, claims = {}) => signIdToken(privateKey, uid, { role: (env.__state.appData.users.find((u) => u.id === uid) || {}).role, ...claims }, kid);
+  const call = async (path, uid, body) => worker.fetch(req(path, { headers: { Authorization: `Bearer ${await tokenFor(uid)}` }, body }), env, {});
+  const get = async (uid, body) => { const r = await call("/data/get", uid, body); return { status: r.status, text: await r.text() }; };
+  const view = async (uid) => { const r = await get(uid); assert.equal(r.status, 200); return JSON.parse(JSON.parse(r.text).data.json); };
+  const save = async (uid, submitted) => call("/data/save", uid, { json: JSON.stringify(submitted) });
+  return { env, get, view, save, data: () => env.__state.appData };
+}
+
+test("section auth / data/get: superadmin receives products, quotations and transactions", async () => {
+  const h = await sectionEnv();
+  const v = await h.view("sa");
+  assert.deepEqual(v.shared.products.map((p) => p.id), ["p1"]);
+  assert.deepEqual(v.shared.quotations.map((p) => p.id), ["q1"]);
+  assert.deepEqual(v.shared.transactions.map((p) => p.id), ["t1"]);
+});
+
+test("section auth / data/get: a user without access gets products=[] quotations=[] and NOTHING sensitive appears anywhere in the response bytes", async () => {
+  const h = await sectionEnv({ permissions: { superadmin: {}, admin: {}, user: {} } }); // no Payments either
+  const r = await h.get("u1");
+  assert.equal(r.status, 200);
+  const v = JSON.parse(JSON.parse(r.text).data.json);
+  assert.deepEqual(v.shared.products, []);
+  assert.deepEqual(v.shared.quotations, []);
+  assert.deepEqual(v.shared.transactions, []);
+  for (const secret of ["TOP-SECRET-PRODUCT", "SECRET-CUSTOMER", "INV-SECRET-9", "PAYER"]) assert.ok(!r.text.includes(secret), `${secret} must not be in the payload`);
+  assert.deepEqual(v.shared.members.map((m) => m.id), ["m1"], "unrelated in-scope data is still delivered");
+});
+
+test("section auth / data/get: role, uid and permissions supplied in the request body are ignored — only the verified token decides", async () => {
+  const h = await sectionEnv();
+  const r = await h.get("u1", { role: "superadmin", uid: "sa", permissions: { user: { products: "write" } }, userPermissions: { u1: { products: "write" } } });
+  assert.equal(r.status, 200);
+  const v = JSON.parse(JSON.parse(r.text).data.json);
+  assert.deepEqual(v.shared.products, []);
+  assert.deepEqual(v.shared.quotations, []);
+  assert.ok(!r.text.includes("TOP-SECRET-PRODUCT") && !r.text.includes("SECRET-CUSTOMER"));
+});
+
+test("section auth / data/save: a hidden-section user cannot alter, wipe or unlock anything — forged permissions and stale data are discarded", async () => {
+  const h = await sectionEnv();
+  const before = JSON.parse(JSON.stringify(h.data()));
+  const submitted = JSON.parse(JSON.stringify(before));
+  submitted.shared.products = [{ id: "evil" }];
+  submitted.shared.quotations = [];
+  submitted.shared.transactions = [{ id: "evil-t" }];
+  submitted.userPermissions = { u1: { products: "write", quotations: "write" } };
+  submitted.permissions.user = { products: "write", quotations: "write", marathon: "write" };
+  submitted.users.find((u) => u.id === "u1").role = "superadmin";
+  const r = await h.save("u1", submitted);
+  assert.equal(r.status, 200, "the save itself succeeds; the unauthorized parts are silently dropped (existing behaviour)");
+  assert.deepEqual(h.data().shared.products, before.shared.products);
+  assert.deepEqual(h.data().shared.quotations, before.shared.quotations);
+  assert.deepEqual(h.data().shared.transactions, before.shared.transactions, "shared writes by a scoped user stay dropped (pre-existing)");
+  assert.deepEqual(h.data().userPermissions, before.userPermissions);
+  assert.deepEqual(h.data().permissions, before.permissions);
+  assert.equal(h.data().users.find((u) => u.id === "u1").role, "user");
+  assert.deepEqual((await h.view("u1")).shared.products, [], "and they still cannot read it afterwards");
+});
+
+test("section auth / Manage Access lifecycle end-to-end: superadmin grants → user sees data → superadmin revokes → hidden again", async () => {
+  const h = await sectionEnv();
+  assert.deepEqual((await h.view("u1")).shared.products, [], "starts hidden");
+
+  // superadmin (as the Manage Access UI does) writes an individual override through the normal save
+  const sa1 = JSON.parse(JSON.stringify(h.data()));
+  sa1.userPermissions = { u1: { products: "view", quotations: "view" } };
+  assert.equal((await h.save("sa", sa1)).status, 200);
+  const granted = await h.view("u1");
+  assert.deepEqual(granted.shared.products.map((p) => p.id), ["p1"]);
+  assert.deepEqual(granted.shared.quotations.map((p) => p.id), ["q1"]);
+  assert.deepEqual(granted.userPermissions, { u1: { products: "view", quotations: "view" } });
+  // view-only: their own write attempt on the section is still discarded
+  const u1Save = JSON.parse(JSON.stringify(h.data())); u1Save.shared.products = [{ id: "p1" }, { id: "hax" }];
+  await h.save("u1", u1Save);
+  assert.deepEqual(h.data().shared.products.map((p) => p.id), ["p1"]);
+
+  // revoke
+  const sa2 = JSON.parse(JSON.stringify(h.data())); sa2.userPermissions = { u1: { products: "hidden" } };
+  assert.equal((await h.save("sa", sa2)).status, 200);
+  const revoked = await h.view("u1");
+  assert.deepEqual(revoked.shared.products, []);
+  assert.deepEqual(revoked.shared.quotations, [], "quotations: the override was replaced wholesale, so the role default (hidden) applies again");
+});
+
+test("section auth / data/save: an ADMIN cannot grant access (permissions/userPermissions are superadmin-only)", async () => {
+  const h = await sectionEnv();
+  const before = JSON.parse(JSON.stringify(h.data()));
+  const s = JSON.parse(JSON.stringify(before));
+  s.userPermissions = { u1: { products: "write" }, adm: { products: "hidden" } };
+  s.permissions.user = { products: "write", quotations: "write", marathon: "write" };
+  assert.equal((await h.save("adm", s)).status, 200);
+  assert.deepEqual(h.data().userPermissions, before.userPermissions);
+  assert.deepEqual(h.data().permissions, before.permissions);
+  assert.deepEqual((await h.view("u1")).shared.products, []);
+});
+
+test("section auth / superadmin keeps full access and writes even when the stored matrix/override says hidden", async () => {
+  const h = await sectionEnv({ permissions: { superadmin: { products: "hidden", quotations: "hidden", marathon: "hidden" }, admin: {}, user: {} }, userPermissions: { sa: { products: "hidden" } } });
+  const v = await h.view("sa");
+  assert.deepEqual(v.shared.products.map((p) => p.id), ["p1"]);
+  const s = JSON.parse(JSON.stringify(h.data())); s.shared.products.push({ id: "p2" });
+  await h.save("sa", s);
+  assert.deepEqual(h.data().shared.products.map((p) => p.id), ["p1", "p2"]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// ROLE FRESHNESS through the real handlers. Scenario: a role-only demotion (what User Management does when no new PIN
+// is entered) changes ONLY appData.users[].role. The user's already-issued ID token still says `admin`; the credentials
+// doc and the persisted claim are stale too. Before the fix such a token kept full admin authority.
+// ---------------------------------------------------------------------------------------------
+async function freshnessEnv() {
+  const { privateKey, publicJwk, kid } = await generateSecuretokenKeyPair();
+  const env = makeEnv({
+    users: [
+      { id: "sa", username: "sa", role: "superadmin", linkedId: null },
+      { id: "adm", username: "adm", role: "admin", linkedId: null },
+      { id: "u1", username: "u1", role: "user", linkedId: "supA" },
+    ],
+    credentials: { sa: { pinHash: HASH_1234, role: "superadmin" }, adm: { pinHash: HASH_1234, role: "admin" }, u1: { pinHash: HASH_1234, role: "user" } },
+  });
+  env.__state.__knownAuthUsers = new Set(["sa", "adm", "u1"]);
+  Object.assign(env.__state.appData, {
+    permissions: { superadmin: {}, admin: {}, user: { marathon: "write" } }, userPermissions: {},
+    shared: { supervisors: [{ id: "supA" }], members: [{ id: "m1", supervisorId: "supA" }], coaches: [], gifts: [], clients: [], products: [], quotations: [], transactions: [] },
+    perUser: { u1: { transactions: [{ id: "u1-private-tx" }], products: [], quotations: [], members: [], gifts: [], coaches: [], supervisors: [], clients: [] } },
+  });
+  installFakeFetch(env, publicJwk);
+  const sign = (uid, role) => signIdToken(privateKey, uid, { role }, kid);
+  const as = async (token, path, body) => worker.fetch(req(path, { headers: { Authorization: `Bearer ${token}` }, body }), env, {});
+  const setStoredRole = (uid, role) => { env.__state.appData.users.find((u) => u.id === uid).role = role; };
+  return { env, sign, as, setStoredRole, data: () => env.__state.appData };
+}
+const viewOf = async (resp) => JSON.parse((await resp.json()).data.json);
+
+test("role freshness / data/get: a demoted admin's OLD admin token no longer yields the full-access view", async () => {
+  const h = await freshnessEnv();
+  const oldToken = await h.sign("adm", "admin");
+  // Observable for "treated as full-access": the user DIRECTORY. (Payments/Quotations are now hierarchy-scoped even for
+  // admins, so another user's bucket is no longer a valid probe.) A scoped caller only receives their downline's accounts.
+  const before = await viewOf(await h.as(oldToken, "/data/get", {}));
+  assert.ok(before.users.some((u) => u.id === "u1") && before.users.some((u) => u.id === "sa"), "control: while still an admin they receive every account");
+  h.setStoredRole("adm", "user");
+  const after = await viewOf(await h.as(oldToken, "/data/get", {}));
+  assert.ok(!after.users.some((u) => u.id === "u1" || u.id === "sa"), "demoted: the directory shrinks to the scoped view immediately");
+});
+
+test("role freshness / data/save: a demoted admin cannot re-promote themselves or edit users with the old token", async () => {
+  const h = await freshnessEnv();
+  const oldToken = await h.sign("adm", "admin");
+  h.setStoredRole("adm", "user");
+  const forged = JSON.parse(JSON.stringify(h.data()));
+  forged.users.find((u) => u.id === "adm").role = "admin";                        // try to undo the demotion
+  forged.users.find((u) => u.id === "u1").role = "admin";                         // and mint another admin
+  forged.users.push({ id: "backdoor", username: "backdoor", role: "admin", linkedId: null });
+  forged.userPermissions = { adm: { products: "write" } };
+  const r = await h.as(oldToken, "/data/save", { json: JSON.stringify(forged) });
+  assert.equal(r.status, 200);
+  assert.equal(h.data().users.find((u) => u.id === "adm").role, "user", "the demotion stands");
+  assert.equal(h.data().users.find((u) => u.id === "u1").role, "user");
+  assert.ok(!h.data().users.some((u) => u.id === "backdoor"));
+  assert.deepEqual(h.data().userPermissions, {});
+});
+
+test("role freshness / user/setPin: a demoted admin's old token can no longer reset or delete other accounts", async () => {
+  const h = await freshnessEnv();
+  const oldToken = await h.sign("adm", "admin");
+  const control = await h.as(oldToken, "/user/setPin", { targetUserId: "u1", newPin: "5555" });
+  assert.equal(control.status, 200, "control: a current admin can reset a user's PIN");
+  h.setStoredRole("adm", "user");
+  const reset = await h.as(oldToken, "/user/setPin", { targetUserId: "u1", newPin: "6666" });
+  assert.equal(reset.status, 403);
+  const del = await h.as(oldToken, "/user/setPin", { targetUserId: "u1", delete: true });
+  assert.equal(del.status, 403);
+  assert.ok(h.data().users.some((u) => u.id === "u1"), "target account still exists");
+});
+
+test("role freshness / privacy admin endpoints: a demoted admin's old token cannot publish policies or change request status", async () => {
+  const h = await freshnessEnv();
+  const oldToken = await h.sign("adm", "admin");
+  const publish = (t) => h.as(t, "/privacy/policy/publish", { type: "privacy_policy", version: "1.4", effectiveDate: "2026-01-01" });
+  assert.equal((await publish(oldToken)).status, 200, "control: a current admin can publish");
+  h.setStoredRole("adm", "user");
+  assert.equal((await publish(oldToken)).status, 403);
+  const status = await h.as(oldToken, "/privacy/request/status", { requestId: "r1", status: "completed" });
+  assert.equal(status.status, 403, "403 (not 404) — authorization is decided before the request is even looked up");
+});
+
+test("role freshness / login: re-login after a role-only demotion does NOT mint the stale admin role", async () => {
+  const h = await freshnessEnv();
+  h.setStoredRole("adm", "user");                    // credentials doc still says admin — this used to win
+  const resp = await worker.fetch(req("/login", { body: { username: "adm", pin: "1234" } }), h.env, {});
+  assert.equal(resp.status, 200);
+  assert.equal((await resp.json()).user.role, "user");
+  const claimWrites = h.env.__state.identityCalls.filter((c) => c.path === "accounts:update").map((c) => c.body.customAttributes).filter(Boolean);
+  assert.ok(claimWrites.length >= 1 && claimWrites.every((c) => JSON.parse(c).role === "user"), "persisted claims are the demoted role: " + claimWrites.join(","));
+});
+
+test("role freshness / superadmin demoted to admin loses superadmin-only powers immediately (access settings stay locked)", async () => {
+  const h = await freshnessEnv();
+  const oldToken = await h.sign("sa", "superadmin");
+  h.setStoredRole("sa", "admin");
+  const s = JSON.parse(JSON.stringify(h.data()));
+  s.userPermissions = { u1: { products: "write" } };
+  assert.equal((await h.as(oldToken, "/data/save", { json: JSON.stringify(s) })).status, 200);
+  assert.deepEqual(h.data().userPermissions, {}, "only a (current) superadmin may change access settings");
+});
+
+test("role freshness / controls: current admins and superadmins are unaffected, and a stored PROMOTION does not raise a user's token role", async () => {
+  const h = await freshnessEnv();
+  const admToken = await h.sign("adm", "admin");
+  const adminView = await viewOf(await h.as(admToken, "/data/get", {}));
+  assert.ok(adminView.users.some((u) => u.id === "u1") && adminView.users.some((u) => u.id === "sa"), "admin: full-access directory as before");
+  const saToken = await h.sign("sa", "superadmin");
+  const s = JSON.parse(JSON.stringify(h.data())); s.userPermissions = { u1: { products: "view" } };
+  await h.as(saToken, "/data/save", { json: JSON.stringify(s) });
+  assert.deepEqual(h.data().userPermissions, { u1: { products: "view" } }, "superadmin: access-settings write still works");
+  // promotion in the stored record only; the token still says `user` => still the scoped view
+  h.setStoredRole("u1", "admin");
+  const u1Token = await h.sign("u1", "user");
+  const u1View = await viewOf(await h.as(u1Token, "/data/get", {}));
+  assert.deepEqual(Object.keys(u1View.perUser), ["u1"], "no privilege is granted from the stored role alone");
+});
+
+test("role freshness / privacy/export: a demoted admin's old token exports with the demoted role's section access", async () => {
+  const h = await freshnessEnv();
+  h.data().perUser.adm = { transactions: [], products: [{ id: "adm-own-product" }], quotations: [], members: [], gifts: [], coaches: [], supervisors: [], clients: [] };
+  const oldToken = await h.sign("adm", "admin");
+  const exported = async () => (await (await h.as(oldToken, "/privacy/export", {})).json()).data.export;
+  assert.deepEqual((await exported()).ownRecords.products.map((p) => p.id), ["adm-own-product"], "control: admin default => Products write");
+  h.setStoredRole("adm", "user");
+  assert.deepEqual((await exported()).ownRecords.products, [], "demoted to user => Products hidden by default, so not exported either");
+});
+
+// ---------------------------------------------------------------------------------------------
+// DATA SCOPE through the real HTTP handlers: Payments + Quotations, hierarchy supTop > supMid > supLow, supOther unrelated.
+// The only request field the server reads is `scope`, and it is a REQUEST that is validated, never trusted.
+// ---------------------------------------------------------------------------------------------
+async function scopeEnv() {
+  const { privateKey, publicJwk, kid } = await generateSecuretokenKeyPair();
+  const env = makeEnv({
+    users: [
+      { id: "sa", username: "sa", role: "superadmin", linkedId: null },
+      { id: "adm", username: "adm", role: "admin", linkedId: "supMid" },
+      { id: "top", username: "top", role: "user", linkedId: "supTop" },
+      { id: "low", username: "low", role: "user", linkedId: "supLow" },
+      { id: "other", username: "other", role: "user", linkedId: "supOther" },
+    ],
+  });
+  const pay = (o, status) => ({ id: `pay-${o}`, customer: `PAYER-${o}`, amount: 10, status, ownerId: o });
+  const quo = (o) => ({ id: `q-${o}`, customerName: `QCUST-${o}`, invoiceNumber: `INV-${o}`, ownerId: o });
+  Object.assign(env.__state.appData, {
+    permissions: { superadmin: {}, admin: {}, user: { marathon: "write", quotations: "write" } }, userPermissions: {},
+    shared: {
+      supervisors: [{ id: "supTop", supervisorId: null }, { id: "supMid", supervisorId: "supTop" }, { id: "supLow", supervisorId: "supMid" }, { id: "supOther", supervisorId: null }],
+      members: [], coaches: [], gifts: [], clients: [], products: [],
+      transactions: [pay("sa", "pending"), pay("adm", "completed"), pay("top", "pending"), pay("low", "pending"), pay("other", "pending"), { id: "pay-legacy", customer: "PAYER-legacy", status: "pending" }],
+      quotations: [quo("sa"), quo("adm"), quo("top"), quo("low"), quo("other")],
+    },
+    perUser: {},
+  });
+  installFakeFetch(env, publicJwk);
+  const as = async (uid, path, body) => worker.fetch(req(path, { headers: { Authorization: `Bearer ${await signIdToken(privateKey, uid, { role: (env.__state.appData.users.find((u) => u.id === uid) || {}).role }, kid)}` }, body }), env, {});
+  const get = async (uid, body) => { const r = await as(uid, "/data/get", body); const text = await r.text(); let json = null; try { json = JSON.parse(text); } catch (e) {} return { status: r.status, text, json, view: r.status === 200 ? JSON.parse(json.data.json) : null }; };
+  return { env, as, get, data: () => env.__state.appData };
+}
+const idsOf = (a) => (a || []).map((x) => x.id).sort();
+
+test("data scope / A,O: superadmin can request All Data and is unrestricted", async () => {
+  const h = await scopeEnv();
+  for (const body of [{}, { scope: "all" }]) {
+    const r = await h.get("sa", body);
+    assert.equal(r.status, 200);
+    assert.equal(r.view.shared.transactions.length, 6, "everything, including the legacy record with no owner");
+    assert.equal(r.view.shared.quotations.length, 5);
+    assert.equal(r.view.dataScope.active, "all");
+    assert.ok(r.view.dataScope.allowed.includes("all"));
+  }
+});
+
+test("data scope / B,P: an admin cannot request All Data — rejected with a distinguishable code, and the default view is their hierarchy only", async () => {
+  const h = await scopeEnv();
+  const denied = await h.get("adm", { scope: "all" });
+  assert.equal(denied.status, 403);
+  assert.equal(denied.json.error.code, "SCOPE_NOT_ALLOWED");
+  assert.ok(!denied.text.includes("PAYER-") && !denied.text.includes("QCUST-"), "the rejection leaks nothing");
+  const ok = await h.get("adm", {});
+  assert.equal(ok.status, 200);
+  assert.deepEqual(idsOf(ok.view.shared.transactions), ["pay-adm", "pay-low"]);
+  assert.deepEqual(idsOf(ok.view.shared.quotations), ["q-adm", "q-low"]);
+  assert.ok(!ok.view.dataScope.allowed.includes("all"));
+});
+
+test("data scope / C: a normal user cannot request All Data", async () => {
+  const h = await scopeEnv();
+  for (const uid of ["low", "top", "other"]) {
+    const r = await h.get(uid, { scope: "all" });
+    assert.equal(r.status, 403, uid); assert.equal(r.json.error.code, "SCOPE_NOT_ALLOWED");
+  }
+});
+
+test("data scope / D,E,F: forged role, uid, userId, linkedId, permissions and 'all' flags in the body change nothing", async () => {
+  const h = await scopeEnv();
+  const plain = await h.get("adm", {});
+  const forged = await h.get("adm", { role: "superadmin", uid: "sa", userId: "sa", linkedId: "supTop", all: true, includeAll: true, scopeAll: true,
+    permissions: { admin: { marathon: "write" } }, userPermissions: { adm: { marathon: "write" } }, hierarchy: { downline: ["other", "top"] }, owners: ["other", "top", "sa"] });
+  assert.equal(forged.status, 200);
+  assert.deepEqual(forged.view.shared.transactions, plain.view.shared.transactions);
+  assert.deepEqual(forged.view.shared.quotations, plain.view.shared.quotations);
+  assert.ok(!forged.text.includes("PAYER-sa") && !forged.text.includes("PAYER-top") && !forged.text.includes("PAYER-other") && !forged.text.includes("QCUST-other"));
+  const forgedUser = await h.get("low", { role: "admin", uid: "adm", linkedId: "supTop", scope: "mine" });
+  assert.deepEqual(idsOf(forgedUser.view.shared.transactions), ["pay-low"], "a user's own scope, whatever hierarchy they claim");
+  const leafAll = await h.get("low", { scope: "mine_downline" });
+  assert.equal(leafAll.status, 403, "a leaf has no downline, so that option is not offered — and is rejected if forced");
+});
+
+test("data scope / hostile scope values (wrong types, prototype keys, unknown names, 'upline') are rejected, null/absent use the default", async () => {
+  const h = await scopeEnv();
+  for (const bad of [{ $ne: 1 }, ["all"], ["mine"], 1, true, "ALL", "upline", "everything", "__proto__", "constructor", "", "mine ", "mine,all"]) {
+    const r = await h.get("adm", { scope: bad });
+    assert.equal(r.status, 403, JSON.stringify(bad)); assert.equal(r.json.error.code, "SCOPE_NOT_ALLOWED");
+  }
+  assert.equal((await h.get("adm", { scope: null })).status, 200);
+  assert.equal((await h.get("adm", {})).status, 200);
+  assert.equal((await h.get("adm", undefined)).status, 200, "no body at all still works (existing clients)");
+});
+
+test("data scope / G,H: a user cannot obtain another unrelated user's Payments or Quotations via any request", async () => {
+  const h = await scopeEnv();
+  for (const scope of [undefined, "mine", "downline", "mine_downline"]) {
+    const r = await h.get("low", scope === undefined ? {} : { scope });
+    if (r.status !== 200) { assert.equal(r.json.error.code, "SCOPE_NOT_ALLOWED"); continue; }  // 'downline' for a leaf is not offered
+    for (const o of ["other", "top", "adm", "sa"]) assert.ok(!r.text.includes(`PAYER-${o}`) && !r.text.includes(`QCUST-${o}`) && !r.text.includes(`INV-${o}`), `${scope}: ${o}`);
+    assert.ok(!r.text.includes("PAYER-legacy"));
+  }
+});
+
+test("data scope / I: hierarchy is respected — adm sees their downline's records, never an upline's or an unrelated user's", async () => {
+  const h = await scopeEnv();
+  const down = await h.get("adm", { scope: "downline" });
+  assert.deepEqual(idsOf(down.view.shared.transactions), ["pay-low"]);
+  const mine = await h.get("adm", { scope: "mine" });
+  assert.deepEqual(idsOf(mine.view.shared.transactions), ["pay-adm"]);
+  const top = await h.get("top", {});
+  assert.deepEqual(idsOf(top.view.shared.transactions), ["pay-adm", "pay-low", "pay-top"], "top's downline includes adm and low");
+  assert.ok(!top.text.includes("PAYER-other"));
+});
+
+test("data scope / J,K: a hidden section stays hidden whatever scope is requested; view-only stays view-only", async () => {
+  const h = await scopeEnv();
+  h.data().userPermissions = { adm: { marathon: "hidden", quotations: "view" } };
+  for (const scope of [undefined, "mine", "downline", "mine_downline"]) {
+    const r = await h.get("adm", scope === undefined ? {} : { scope });
+    assert.equal(r.status, 200); assert.deepEqual(r.view.shared.transactions, [], `hidden Payments (${scope})`);
+    assert.ok(r.view.shared.quotations.length > 0, "view-only Quotations are still served");
+  }
+  const before = JSON.parse(JSON.stringify(h.data().shared.quotations));
+  const s = JSON.parse(JSON.stringify(h.data())); s.shared.quotations = s.shared.quotations.map((q) => ({ ...q, customerName: "CHANGED" }));
+  assert.equal((await h.as("adm", "/data/save", { json: JSON.stringify(s) })).status, 200);
+  assert.deepEqual(h.data().shared.quotations, before, "view-only: the write is discarded");
+});
+
+test("data scope / M,N: the Payment-status filter can never expose anything — the server decides what exists before any status is applied", async () => {
+  const h = await scopeEnv();
+  const baseline = await h.get("adm", {});
+  for (const status of ["pending", "completed", "all", "refunded", "__proto__", "", null, { $ne: "x" }, ["pending"]]) {
+    const r = await h.get("adm", { paymentStatus: status, status, filter: status, payment_status: status });
+    assert.equal(r.status, 200, JSON.stringify(status));
+    assert.deepEqual(r.view.shared.transactions, baseline.view.shared.transactions, "no status value changes what the server returns");
+    for (const unauthorised of ["PAYER-sa", "PAYER-top", "PAYER-other", "PAYER-legacy"]) assert.ok(!r.text.includes(unauthorised), `${JSON.stringify(status)} -> ${unauthorised}`);
+  }
+  // unauthorised PENDING records exist (top/other/sa/legacy are pending) yet never reach a Pending-filtering client
+  assert.ok(h.data().shared.transactions.filter((t) => t.status === "pending").length > baseline.view.shared.transactions.filter((t) => t.status === "pending").length);
+});
+
+test("data scope / L: stale-data replay and narrowed-client saves cannot damage out-of-scope data", async () => {
+  const h = await scopeEnv();
+  const before = JSON.parse(JSON.stringify(h.data().shared.transactions));
+  const held = (await h.get("adm", {})).view;                        // the admin's client only ever holds pay-adm + pay-low
+  const s = JSON.parse(JSON.stringify(h.data()));
+  s.shared.transactions = held.shared.transactions.map((t) => (t.id === "pay-adm" ? { ...t, amount: 77 } : t));
+  s.shared.transactions.push({ id: "pay-evil", customer: "EVIL", ownerId: "top" }, { id: "pay-other", customer: "HIJACK", ownerId: "adm" });
+  assert.equal((await h.as("adm", "/data/save", { json: JSON.stringify(s) })).status, 200);
+  const after = Object.fromEntries(h.data().shared.transactions.map((t) => [t.id, t]));
+  assert.equal(after["pay-adm"].amount, 77, "in-scope edit applied");
+  for (const keep of ["pay-sa", "pay-top", "pay-other", "pay-legacy"]) assert.deepEqual(after[keep], before.find((t) => t.id === keep), `${keep} untouched`);
+  assert.ok(!after["pay-evil"], "cannot forge a record for an upline");
+  // moving `low` out of adm's tree: an old client replaying low's record cannot edit or delete it any more
+  h.data().shared.supervisors.find((x) => x.id === "supLow").supervisorId = "supOther";
+  const replay = JSON.parse(JSON.stringify(h.data())); replay.shared.transactions = held.shared.transactions.map((t) => (t.id === "pay-low" ? { ...t, amount: 31337 } : t));
+  await h.as("adm", "/data/save", { json: JSON.stringify(replay) });
+  assert.equal(h.data().shared.transactions.find((t) => t.id === "pay-low").amount, 10);
+});
+
+test("data scope / O: superadmin saves remain unrestricted", async () => {
+  const h = await scopeEnv();
+  const s = JSON.parse(JSON.stringify(h.data())); s.shared.transactions = [{ id: "only", ownerId: "other" }];
+  assert.equal((await h.as("sa", "/data/save", { json: JSON.stringify(s) })).status, 200);
+  assert.deepEqual(h.data().shared.transactions.map((t) => t.id), ["only"]);
+});
+
+test("data scope / a demoted admin's old token is scoped as the demoted role, and still cannot request All Data", async () => {
+  const h = await scopeEnv();
+  h.data().users.find((u) => u.id === "adm").role = "user";
+  const denied = await h.get("adm", { scope: "all" });
+  assert.equal(denied.status, 403);
+  assert.deepEqual(idsOf((await h.get("adm", {})).view.shared.transactions), ["pay-adm", "pay-low"]);
+});

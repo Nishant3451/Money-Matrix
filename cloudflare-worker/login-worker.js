@@ -39,7 +39,7 @@ import {
 } from "./lib/googleFirestore.js";
 import { mintFirebaseCustomToken, setClaimsEnsuringUserExists, deleteAuthUser, revokeRefreshTokens } from "./lib/firebaseIdentity.js";
 import { verifyFirebaseIdToken } from "./lib/firebaseToken.js";
-import { buildAuthorizedView, mergeAuthorizedSave, isFullAccessRole } from "./lib/authorization.js";
+import { buildAuthorizedView, mergeAuthorizedSave, isFullAccessRole, effectiveRole } from "./lib/authorization.js";
 import { authorizeSetUserPin } from "./lib/userPin.js";
 import {
   PRIVACY_REQUEST_CATEGORIES,
@@ -366,7 +366,9 @@ async function handleLogin(request, env, cors) {
       return authError("Invalid username or PIN", 401, cors);
     }
 
-    const role = entry.role || user.role || "user";
+    // entry.role (credentials doc) is only rewritten by /user/setPin; a role-only edit changes users[].role alone.
+    // Never mint a role HIGHER than the stored user record's, so re-login after a demotion can't restore it.
+    const role = effectiveRole(entry.role || user.role || "user", user);
     const claims = { approved: true, role };
 
     await setClaimsEnsuringUserExists(env, accessToken, user.id, claims);
@@ -407,7 +409,23 @@ async function handleDataGet(request, env, cors) {
     // (they go through runPrivacyMutation, a separate code path this does not touch), so the user
     // can always still read policies and call /privacy/policy/accept to satisfy this.
     if (!hasAcceptedAllCurrentPolicies(fullData, auth.uid)) return policyAcceptanceRequiredError(cors, fullData, auth.uid);
-    const view = buildAuthorizedView(fullData, { uid: auth.uid, role: auth.role, linkedId: me.linkedId || null });
+    // Role = the token's claim, DEMOTED to the stored record's role if that has less privilege (see effectiveRole).
+    // `scope` is the ONLY field read from this request body, and it is only a REQUEST: buildAuthorizedView validates it
+    // against the maximum scope the server computes from the verified identity + stored hierarchy, and anything not
+    // allowed is rejected (never widened). Role / uid / permissions / hierarchy in the body are never read.
+    const parsedBody = await readJsonBody(request, 4096);
+    const requestedScope = parsedBody && !parsedBody.invalid && parsedBody.value && typeof parsedBody.value === "object" && !Array.isArray(parsedBody.value)
+      ? parsedBody.value.scope
+      : undefined;
+    let view;
+    try {
+      view = buildAuthorizedView(fullData, { uid: auth.uid, role: effectiveRole(auth.role, me), linkedId: me.linkedId || null }, { scope: requestedScope });
+    } catch (scopeErr) {
+      if (scopeErr && scopeErr.code === "SCOPE_NOT_ALLOWED") {
+        return jsonResponse({ error: { message: "That data scope is not available for your account.", code: "SCOPE_NOT_ALLOWED" } }, 403, cors);
+      }
+      throw scopeErr;
+    }
     return jsonResponse({ data: { json: JSON.stringify(view) } }, 200, cors);
   } catch (e) {
     console.error("data/get error:", e && e.stack ? e.stack : e);
@@ -467,9 +485,11 @@ async function handleDataSave(request, env, cors) {
       // they craft the request by hand.
       if (!hasAcceptedAllCurrentPolicies(serverData, auth.uid)) return policyAcceptanceRequiredError(cors, serverData, auth.uid);
 
+      // Re-derived on EVERY attempt from this attempt's fresh read, so a demotion that lands between retries
+      // is honoured and the role can never be older than the snapshot the merge runs against.
       const merged = mergeAuthorizedSave(serverData, submitted, {
         uid: auth.uid,
-        role: auth.role,
+        role: effectiveRole(auth.role, me),
         linkedId: me.linkedId || null,
       });
       const write = await writeAppDataIfUnchanged(env, accessToken, merged, updateTime);
@@ -567,7 +587,10 @@ async function handleSetUserPin(request, env, cors) {
     ]);
     const targetUser = (appData.users || []).find((u) => u.id === targetUserId) || null;
 
-    const decision = authorizeSetUserPin({ uid: auth.uid, role: auth.role }, targetUser, payload);
+    // The caller's own stored record (same snapshot) can only DEMOTE the token role — a demoted admin must not
+    // keep resetting/deleting other accounts with an old token. If there is no stored record, behaviour is unchanged.
+    const callerRecord = (appData.users || []).find((u) => u.id === auth.uid) || null;
+    const decision = authorizeSetUserPin({ uid: auth.uid, role: effectiveRole(auth.role, callerRecord) }, targetUser, payload);
     if (!decision.ok) return authError(decision.error, 403, cors);
 
     if (decision.op === "self") {
@@ -964,7 +987,9 @@ async function handlePrivacyRequestStatus(request, env, cors) {
   if (!isNonEmptyString(requestId)) return authError("requestId is required", 400, cors);
 
   try {
-    const outcome = await runPrivacyMutation(env, auth, async ({ appData }) => {
+    const outcome = await runPrivacyMutation(env, auth, async ({ appData, me }) => {
+      // The early check above used the token claim; this one uses the freshly-read stored record (demote-only).
+      if (!isFullAccessRole(effectiveRole(auth.role, me))) return { error: { message: "Not authorized", status: 403 } };
       const requests = Array.isArray(appData.privacyRequests) ? appData.privacyRequests : [];
       const idx = requests.findIndex((r) => r.id === requestId);
       if (idx === -1) return { error: { message: "Request not found", status: 404 } };
@@ -1024,7 +1049,9 @@ async function handlePolicyPublish(request, env, cors) {
   }
 
   try {
-    const outcome = await runPrivacyMutation(env, auth, async ({ appData }) => {
+    const outcome = await runPrivacyMutation(env, auth, async ({ appData, me }) => {
+      // The early check above used the token claim; this one uses the freshly-read stored record (demote-only).
+      if (!isFullAccessRole(effectiveRole(auth.role, me))) return { error: { message: "Not authorized", status: 403 } };
       const versions = Array.isArray(appData.policyVersions) ? [...appData.policyVersions] : [];
       const idx = versions.findIndex((p) => p.type === type && p.version === version);
       const entry = { type, version, effectiveDate, status };
@@ -1062,7 +1089,7 @@ async function handlePrivacyExport(request, env, cors) {
     const outcome = await runPrivacyMutation(env, auth, async ({ appData, me }) => {
       // Reuse buildAuthorizedView so the export can never contain more than the caller could
       // already legitimately read via /data/get -- one authorization surface, not two.
-      const view = buildAuthorizedView(appData, { uid: auth.uid, role: auth.role, linkedId: me.linkedId || null });
+      const view = buildAuthorizedView(appData, { uid: auth.uid, role: effectiveRole(auth.role, me), linkedId: me.linkedId || null });
 
       const exportPayload = {
         exportedAt: new Date().toISOString(),
