@@ -8,7 +8,7 @@
 // ============================================================================================
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mergeAuthorizedSave, buildAuthorizedView, getDownlineSupervisorIds } from "../lib/authorization.js";
+import { mergeAuthorizedSave, buildAuthorizedView, getDownlineSupervisorIds, resolveSectionPerm } from "../lib/authorization.js";
 
 function baseData() {
   return {
@@ -100,21 +100,28 @@ test("CASE F — a plain user cannot modify another user's role via /data/save",
 });
 
 // ---- CASE G: user modifies their own userPermissions -------------------------------------------
-// This IS allowed (self-scope, by design) — the question is whether it grants any actual
-// server-enforced capability. It must not: authorization.js never *consults* userPermissions
-// when deciding write scope for shared/control-plane sections, so a forged override is inert.
-test("CASE G — a self-granted userPermissions override does not expand write scope elsewhere", () => {
+// HISTORY: this used to be accepted (self-scope) on the grounds that it was INERT — authorization.js
+// never consulted userPermissions, so a forged override could not unlock anything. That premise no longer
+// holds: resolveSectionPerm() now consults userPermissions to gate Products/Quotations/Payments on the
+// server. A self-written override would therefore be a real self-grant, so it is now DISCARDED (the
+// server's copy always wins), and the payload's other out-of-scope writes are still ignored.
+test("CASE G — a self-granted userPermissions override is discarded and expands nothing", () => {
   const d = baseData();
   const submitted = JSON.parse(JSON.stringify(d));
   // Forge an expansive-looking self-override...
-  submitted.userPermissions.sup_a = { everything: "superadmin", club: "write", users: "write" };
+  submitted.userPermissions.sup_a = { everything: "superadmin", club: "write", users: "write", products: "write", quotations: "write", marathon: "write" };
   // ...and, in the SAME payload, attempt an out-of-scope write it might be hoped to unlock.
   submitted.shared.clients.push({ id: "sneaky", name: "Should not land" });
   submitted.settings = { appName: "HACKED" };
-  const merged = mergeAuthorizedSave(d, submitted, { uid: "sup_a", role: "user", linkedId: "supA" });
-  // The forged override itself is accepted (it's the caller's own bucket)...
-  assert.deepEqual(merged.userPermissions.sup_a, { everything: "superadmin", club: "write", users: "write" });
-  // ...but it buys nothing: shared.clients and settings are untouched regardless.
+  const caller = { uid: "sup_a", role: "user", linkedId: "supA" };
+  const merged = mergeAuthorizedSave(d, submitted, caller);
+  // The forged override is NOT persisted: the server's existing value is untouched.
+  assert.deepEqual(merged.userPermissions.sup_a, d.userPermissions.sup_a, "self-written override must be discarded");
+  assert.deepEqual(merged.userPermissions, d.userPermissions);
+  // It buys nothing: no section access, and shared.clients / settings are untouched regardless.
+  for (const section of ["products", "quotations", "marathon"]) {
+    assert.notEqual(resolveSectionPerm(merged, caller, section), "write", `${section}: forged override must not grant write`);
+  }
   assert.deepEqual(merged.shared.clients, d.shared.clients, "userPermissions must not unlock shared.clients writes");
   assert.deepEqual(merged.settings, d.settings, "userPermissions must not unlock settings writes");
 });

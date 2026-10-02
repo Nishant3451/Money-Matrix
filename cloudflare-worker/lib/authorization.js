@@ -51,6 +51,286 @@ export function isFullAccessRole(role) {
   return role === "superadmin" || role === "admin";
 }
 
+// ---------------------------------------------------------------------------------------------
+// ROLE FRESHNESS. The Worker takes the caller's role from the verified ID token's `role` claim, and
+// an already-issued ID token (and the persisted claim a refresh/re-login re-reads) can be OLDER than
+// the user's stored role: the User Management role-only edit changes appData.users[].role through
+// /data/save and does NOT touch the credentials doc, the Firebase claim or any session. A demoted
+// admin therefore kept admin authority — and could even re-promote themselves — until a PIN reset.
+//
+// The stored record is already read, in the same snapshot, by every handler that authorizes on role,
+// so it is the authoritative current role at zero extra I/O. This is DEMOTE-ONLY by design: when the
+// stored role carries LESS privilege than the token claims, the stored role wins immediately; a stored
+// role never raises privilege above what the token proves (promotions still take effect through a
+// fresh login as before). Privilege order is superadmin > admin > everything else.
+// ---------------------------------------------------------------------------------------------
+const ROLE_RANK = { superadmin: 2, admin: 1 };
+const roleRank = (r) => (hasOwn(ROLE_RANK, r) ? ROLE_RANK[r] : 0);
+export function effectiveRole(tokenRole, storedUser) {
+  const stored = storedUser && typeof storedUser.role === "string" && storedUser.role ? storedUser.role : null;
+  if (!stored) return tokenRole; // no authoritative record to compare against: unchanged behaviour
+  return roleRank(stored) < roleRank(tokenRole) ? stored : tokenRole;
+}
+
+// ============================================================================================
+// SECTION-LEVEL AUTHORIZATION (server-enforced)
+//
+// Until now the Worker only did downline scoping; the per-section permissions (Access Control /
+// Individual Access / Product & Quotation "Manage Access") were enforced ONLY by the browser, so a
+// user with a section set to "hidden" still received that section's data from /data/get and could
+// still write it via /data/save. This block makes the Worker authoritative for the three sensitive
+// datasets, using the app's EXISTING permission data — not a new permission system.
+//
+//   permission key  ->  data collection (both in `shared` and in every `perUser` bucket)
+//   products        ->  products
+//   quotations      ->  quotations   (also covers invoices: an invoice is a quotation that has an
+//                                     invoiceNumber; there is no separate invoices collection)
+//   marathon        ->  transactions ("Payments" in the UI)
+//
+// Resolution order is a line-for-line mirror of getPerm() in index.html so client and server can
+// never disagree:  superadmin -> per-user override -> role matrix -> role fallback.
+// Everything is computed from the SERVER's stored data and the verified caller identity; nothing
+// the client submits (role, permissions, overrides) is ever consulted.
+// ============================================================================================
+export const GATED_SECTIONS = Object.freeze([
+  Object.freeze({ permKey: "products", collection: "products" }),
+  Object.freeze({ permKey: "quotations", collection: "quotations" }),
+  Object.freeze({ permKey: "marathon", collection: "transactions" }),
+]);
+
+const hasOwn = (o, k) => !!o && typeof o === "object" && Object.prototype.hasOwnProperty.call(o, k);
+// Anything that is not exactly "view" or "write" is treated as "hidden" (fail closed) — the client
+// does the same, since canView()/canWrite() only accept those two values.
+const normalizePerm = (v) => (v === "view" || v === "write" ? v : "hidden");
+
+/**
+ * @returns {"hidden"|"view"|"write"} the caller's effective permission for `section`.
+ * @param {object} data    the server's authoritative appData (permissions / userPermissions)
+ * @param {object} caller  { uid, role } — resolved server-side from the verified token
+ */
+export function resolveSectionPerm(data, caller, section) {
+  const { uid, role } = caller || {};
+  // Superadmin is unrestricted and cannot be locked out by any override or matrix entry.
+  if (role === "superadmin") return "write";
+  const overrides = data && data.userPermissions;
+  if (hasOwn(overrides, uid) && hasOwn(overrides[uid], section) && overrides[uid][section]) {
+    return normalizePerm(overrides[uid][section]);
+  }
+  const matrix = data && data.permissions;
+  if (hasOwn(matrix, role) && hasOwn(matrix[role], section) && matrix[role][section]) {
+    return normalizePerm(matrix[role][section]);
+  }
+  return role === "admin" ? "write" : "hidden";
+}
+export const canViewSection = (data, caller, section) => resolveSectionPerm(data, caller, section) !== "hidden";
+export const canWriteSection = (data, caller, section) => resolveSectionPerm(data, caller, section) === "write";
+
+// ============================================================================================
+// DATA SCOPE for Payments (transactions) and Quotations — WHOSE records a caller may see.
+//
+// Section permission (above) decides IF a caller may see a section at all; this decides WHICH PEOPLE'S
+// records within it. It reuses the existing hierarchy, it does not add one:
+//   * the tree is shared.supervisors[].supervisorId (a node's upline),
+//   * a user attaches to it through users[].linkedId, and
+//   * "downline" is exactly getDownlineSupervisorIds() / scopeUsers() — the same rule that already scopes
+//     members, coaches, supervisors and the users list.
+// Every record carries ownerId (saveTx / saveQuotation stamp it); in per-user mode the owner is the bucket.
+//
+// MAXIMUM scope, computed here from the SERVER's data and the verified caller — never from the request:
+//   superadmin            -> everything ("all"), including legacy records that carry no ownerId
+//   admin / user / other  -> themselves + their downline ("mine_downline"). Admin gets NO "all": the old
+//                            "full-access roles see every record" behaviour is intentionally not applied
+//                            to these two collections.
+// "Upline" is deliberately NOT a scope: no existing rule lets any role see an upline's records, and
+// exposing a superior's payments/quotations would be a new privilege, not a view of existing ones.
+// A client may REQUEST a narrower scope; anything outside `allowed` is rejected, never widened.
+// ============================================================================================
+export const DATA_SCOPES = Object.freeze(["all", "mine_downline", "mine", "downline"]);
+export const SCOPED_COLLECTIONS = Object.freeze(["transactions", "quotations"]);
+
+/** @returns {{allowed:string[], defaultScope:string, owners:{mine:string[],downline:string[],mine_downline:string[]}, isSuper:boolean}} */
+export function resolveDataScope(fullData, caller) {
+  const { uid, role, linkedId } = caller || {};
+  const users = Array.isArray(fullData && fullData.users) ? fullData.users : [];
+  const supervisors = (fullData && fullData.shared && fullData.shared.supervisors) || [];
+  const downlineNodes = linkedId ? getDownlineSupervisorIds(linkedId, supervisors) : new Set();
+  const downline = [];
+  for (const u of users) {
+    if (u && typeof u.id === "string" && u.id !== uid && u.linkedId && downlineNodes.has(u.linkedId)) downline.push(u.id);
+  }
+  const mine = typeof uid === "string" && uid ? [uid] : [];
+  const isSuper = role === "superadmin";
+  const hasDownline = downline.length > 0;
+  const allowed = [];
+  if (isSuper) allowed.push("all");
+  if (hasDownline) allowed.push("mine_downline");
+  allowed.push("mine");
+  if (hasDownline) allowed.push("downline");
+  return {
+    allowed,
+    defaultScope: isSuper ? "all" : hasDownline ? "mine_downline" : "mine",
+    owners: { mine, downline, mine_downline: [...new Set([...mine, ...downline])] },
+    isSuper,
+  };
+}
+
+/** Validates a CLIENT-REQUESTED scope against what the server computed. undefined/null => the default. */
+export function resolveRequestedScope(ds, requested) {
+  if (requested === undefined || requested === null) return { ok: true, key: ds.defaultScope };
+  if (typeof requested !== "string" || !ds.allowed.includes(requested)) return { ok: false };
+  return { ok: true, key: requested };
+}
+/** Owner-id Set for a scope key, or null meaning "no owner restriction" (superadmin's "all"). */
+const ownerSetForScope = (ds, key) => (key === "all" ? null : new Set(ds.owners[key] || []));
+const ownedBy = (rec, owners) => owners === null || (!!rec && typeof rec.ownerId === "string" && owners.has(rec.ownerId));
+
+function scopeError() {
+  return Object.assign(new Error("Requested data scope is not allowed"), { code: "SCOPE_NOT_ALLOWED" });
+}
+
+/** Applies the data scope to an already section-gated view (copies only; inputs are never mutated). */
+function gateScopeForView(out, fullData, caller, ds, activeKey) {
+  const owners = ownerSetForScope(ds, activeKey);
+  const shared = { ...(out.shared || {}) };
+  for (const coll of SCOPED_COLLECTIONS) {
+    if (Array.isArray(shared[coll])) shared[coll] = shared[coll].filter((r) => ownedBy(r, owners));
+  }
+  const perUser = {};
+  for (const [id, bucket] of Object.entries(out.perUser || {})) {
+    if (!isPlainObject(bucket) || owners === null || owners.has(id)) { perUser[id] = bucket; continue; }
+    const copy = { ...bucket };
+    for (const coll of SCOPED_COLLECTIONS) if (Array.isArray(copy[coll])) copy[coll] = [];
+    perUser[id] = copy;
+  }
+  // Non-full callers are only ever sent their OWN bucket. For the scopes that include other people, add the
+  // scoped collections (only) of those people's buckets — and only for sections the caller may view.
+  if (owners !== null && !isFullAccessRole(caller.role)) {
+    const fullPerUser = fullData.perUser || {};
+    for (const id of owners) {
+      if (hasOwn(perUser, id) || !isPlainObject(fullPerUser[id])) continue;
+      const partial = {};
+      for (const { permKey, collection } of GATED_SECTIONS) {
+        if (!SCOPED_COLLECTIONS.includes(collection)) continue;
+        partial[collection] = canViewSection(fullData, caller, permKey) && Array.isArray(fullPerUser[id][collection]) ? fullPerUser[id][collection] : [];
+      }
+      perUser[id] = partial;
+    }
+  }
+  // The activity log names customers of payments/quotations. Entries record an actor DISPLAY NAME (client-written,
+  // not an id), so attribution is best-effort and fails closed: keep a payments/quotations entry only when its actor
+  // matches the username or display name of someone whose records are in scope; superadmin "all" keeps everything.
+  let activityLog = out.activityLog;
+  if (owners !== null) {
+    const actors = new Set();
+    for (const u of fullData.users || []) {
+      if (u && owners.has(u.id)) {
+        if (u.username) actors.add(u.username);
+        const dn = fullData.profiles && fullData.profiles[u.id] && fullData.profiles[u.id].displayName;
+        if (dn) actors.add(dn);
+      }
+    }
+    activityLog = (out.activityLog || []).filter((a) => !a || !SCOPED_COLLECTIONS.includes(a.coll) || actors.has(a.user));
+  }
+  return {
+    ...out,
+    shared,
+    perUser,
+    activityLog,
+    dataScope: { allowed: ds.allowed, default: ds.defaultScope, active: activeKey, owners: ds.owners },
+  };
+}
+
+/** mergeScopedArray with identical accept/reject/delete semantics, but records that already exist server-side keep the
+ *  server's relative order (new records follow, in submission order). A no-op save therefore leaves the stored list
+ *  byte-for-byte unchanged instead of re-sorting it into "out-of-scope first" on every save. */
+function mergeScopedArrayStable(serverArr, submittedArr, inScope) {
+  const merged = mergeScopedArray(serverArr, submittedArr, inScope);
+  const pos = new Map((Array.isArray(serverArr) ? serverArr : []).map((r, i) => [r && r.id, i]));
+  const existing = merged.filter((r) => r && pos.has(r.id)).sort((a, b) => pos.get(a.id) - pos.get(b.id));
+  const fresh = merged.filter((r) => !(r && pos.has(r.id)));
+  return [...existing, ...fresh];
+}
+
+/** After a save has been merged, confines a NON-superadmin's changes to Payments/Quotations to records inside their
+ *  maximum scope: records of people outside it are restored from the server, cannot be edited, re-attributed, deleted
+ *  or injected, and an id that collides with an out-of-scope record cannot be taken over. Decided from `serverData`.
+ *  This is what makes it safe that an admin's client only ever HOLDS its in-scope records but a full-access save
+ *  otherwise replaces `shared`/`perUser` wholesale. */
+function applyOwnerScopeWriteGate(merged, serverData, caller) {
+  if (caller.role === "superadmin") return merged;
+  const maxOwners = new Set(resolveDataScope(serverData, caller).owners.mine_downline);
+  const serverShared = serverData.shared || {};
+  const serverPerUser = serverData.perUser || {};
+  const shared = { ...(isPlainObject(merged.shared) ? merged.shared : {}) };
+  for (const coll of SCOPED_COLLECTIONS) {
+    if (!hasOwn(shared, coll)) continue;
+    shared[coll] = mergeScopedArrayStable(serverShared[coll], shared[coll], (r) => ownedBy(r, maxOwners));
+  }
+  const perUser = {};
+  for (const [id, bucket] of Object.entries(isPlainObject(merged.perUser) ? merged.perUser : {})) {
+    if (!isPlainObject(bucket) || maxOwners.has(id)) { perUser[id] = bucket; continue; }
+    const copy = { ...bucket };
+    const serverBucket = serverPerUser[id];
+    for (const coll of SCOPED_COLLECTIONS) {
+      if (!isPlainObject(serverBucket)) copy[coll] = [];
+      else if (hasOwn(serverBucket, coll)) copy[coll] = serverBucket[coll];
+      else delete copy[coll];
+    }
+    perUser[id] = copy;
+  }
+  return { ...merged, shared, perUser };
+}
+
+/** Returns a copy of `out` with every collection the caller may not VIEW emptied — in the shared
+ *  directory, in every per-user bucket they were about to receive, and in the activity log (which
+ *  carries customer/product names). Copies only; `out` and the source data are never mutated. */
+function gateViewForCaller(out, fullData, caller) {
+  const hidden = GATED_SECTIONS.filter((s) => !canViewSection(fullData, caller, s.permKey));
+  if (!hidden.length) return out;
+  const hiddenColls = new Set(hidden.map((s) => s.collection));
+  const shared = { ...(out.shared || {}) };
+  const perUser = {};
+  for (const [id, bucket] of Object.entries(out.perUser || {})) perUser[id] = isPlainObject(bucket) ? { ...bucket } : bucket;
+  for (const { collection } of hidden) {
+    shared[collection] = [];
+    for (const bucket of Object.values(perUser)) if (isPlainObject(bucket)) bucket[collection] = [];
+  }
+  return {
+    ...out,
+    shared,
+    perUser,
+    activityLog: (out.activityLog || []).filter((a) => !(a && hiddenColls.has(a.coll))),
+  };
+}
+
+/** After a save has been merged, restores the SERVER's copy of every gated collection the caller
+ *  may not WRITE (hidden or view-only). Decided from `serverData`, so a caller cannot widen their own
+ *  write access inside the same request. Also what makes it safe that a hidden-section user's client
+ *  holds `[]` for that collection and echoes it back: it can never overwrite the real records. */
+function applySectionWriteGate(merged, serverData, caller) {
+  const locked = GATED_SECTIONS.filter((s) => !canWriteSection(serverData, caller, s.permKey));
+  if (!locked.length) return merged;
+  const serverShared = serverData.shared || {};
+  const serverPerUser = serverData.perUser || {};
+  const shared = { ...(isPlainObject(merged.shared) ? merged.shared : {}) };
+  const perUser = {};
+  for (const [id, bucket] of Object.entries(isPlainObject(merged.perUser) ? merged.perUser : {})) {
+    perUser[id] = isPlainObject(bucket) ? { ...bucket } : bucket;
+  }
+  for (const { collection } of locked) {
+    if (hasOwn(serverShared, collection)) shared[collection] = serverShared[collection];
+    else delete shared[collection];
+    for (const [id, bucket] of Object.entries(perUser)) {
+      if (!isPlainObject(bucket)) continue;
+      const serverBucket = serverPerUser[id];
+      if (!isPlainObject(serverBucket)) bucket[collection] = []; // brand-new bucket: nothing to preserve
+      else if (hasOwn(serverBucket, collection)) bucket[collection] = serverBucket[collection];
+      else delete bucket[collection];
+    }
+  }
+  return { ...merged, shared, perUser };
+}
+
 /** Ports getScopedMembers/Coaches/Supervisors/Activity from index.html. */
 function scopeShared(shared, role, linkedId) {
   const members = shared.members || [];
@@ -98,7 +378,7 @@ function scopeUsers(users, role, linkedId, downlineIds) {
  * @param {object} caller     { uid, role, linkedId }  — role/linkedId resolved server-side from
  *                            the caller's own record in fullData.users, NEVER from client input
  */
-export function buildAuthorizedView(fullData, caller) {
+export function buildAuthorizedView(fullData, caller, opts = {}) {
   const { uid, role, linkedId } = caller;
   const full = isFullAccessRole(role);
   const downlineIds = linkedId ? getDownlineSupervisorIds(linkedId, (fullData.shared || {}).supervisors || []) : new Set();
@@ -158,7 +438,14 @@ export function buildAuthorizedView(fullData, caller) {
     // per-user activity feed (that's what activityLog is for).
     privacyAuditLog: full ? fullData.privacyAuditLog || [] : [],
   };
-  return out;
+  // Section-level gate LAST, so it applies on top of (never instead of) the scope rules above:
+  // "Products: view" widens nothing beyond what the shared/per-user scoping already allowed.
+  const sectionGated = gateViewForCaller(out, fullData, caller);
+  // Then the data scope (WHOSE records), computed from server data. A requested scope is validated, never widened.
+  const ds = resolveDataScope(fullData, caller);
+  const requested = resolveRequestedScope(ds, opts && opts.scope);
+  if (!requested.ok) throw scopeError();
+  return gateScopeForView(sectionGated, fullData, caller, ds, requested.key);
 }
 
 export function emptyPerUserBucket() {
@@ -177,6 +464,11 @@ export function emptyPerUserBucket() {
  * @returns {object} the new authoritative appData.json contents to persist
  */
 export function mergeAuthorizedSave(serverData, submitted, caller) {
+  const sectionGated = applySectionWriteGate(mergeAuthorizedSaveScoped(serverData, submitted, caller), serverData, caller);
+  return applyOwnerScopeWriteGate(sectionGated, serverData, caller);
+}
+
+function mergeAuthorizedSaveScoped(serverData, submitted, caller) {
   const { uid, role, linkedId } = caller;
   const full = isFullAccessRole(role);
   submitted = submitted && typeof submitted === "object" ? submitted : {};
@@ -190,9 +482,12 @@ export function mergeAuthorizedSave(serverData, submitted, caller) {
       users: sanitizeUsersForFullAccessSave(serverData.users, submitted.users, role),
       profiles: isPlainObject(submitted.profiles) ? submitted.profiles : serverData.profiles || {},
       settings: isPlainObject(submitted.settings) ? submitted.settings : serverData.settings || {},
-      permissions: isPlainObject(submitted.permissions) ? submitted.permissions : serverData.permissions || {},
+      // Access settings are the security policy itself: ONLY a superadmin may change them (the UI
+      // already restricts Access Control / Individual Access / Manage Access to superadmin). An
+      // admin's submitted copy is ignored, so an admin cannot grant themselves or anyone else access.
+      permissions: role === "superadmin" && isPlainObject(submitted.permissions) ? submitted.permissions : serverData.permissions || {},
       customSections: Array.isArray(submitted.customSections) ? submitted.customSections : serverData.customSections || [],
-      userPermissions: isPlainObject(submitted.userPermissions) ? submitted.userPermissions : serverData.userPermissions || {},
+      userPermissions: role === "superadmin" && isPlainObject(submitted.userPermissions) ? submitted.userPermissions : serverData.userPermissions || {},
       shared: isPlainObject(submitted.shared) ? submitted.shared : serverData.shared || {},
       perUser: isPlainObject(submitted.perUser) ? submitted.perUser : serverData.perUser || {},
       activityLog: mergeActivityLog(serverData.activityLog, submitted.activityLog, () => true),
@@ -238,9 +533,10 @@ export function mergeAuthorizedSave(serverData, submitted, caller) {
     [uid]: submittedOwnBucket && isPlainObject(submittedOwnBucket) ? submittedOwnBucket : serverPerUser[uid] || emptyPerUserBucket(),
   };
 
-  const submittedOwnOverride = isPlainObject(submitted.userPermissions) ? submitted.userPermissions[uid] : null;
+  // A non-privileged caller may NOT change any userPermissions entry, including their own. This used to
+  // be allowed because the server never consulted userPermissions; now that resolveSectionPerm()
+  // does, accepting a self-written override would be a self-service privilege escalation.
   const mergedUserPermissions = { ...(serverData.userPermissions || {}) };
-  if (isPlainObject(submittedOwnOverride)) mergedUserPermissions[uid] = submittedOwnOverride;
 
   return {
     // Control-plane sections: server's copy always wins for a non-privileged caller.

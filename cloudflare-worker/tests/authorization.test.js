@@ -1,11 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getDownlineSupervisorIds, buildAuthorizedView, mergeAuthorizedSave } from "../lib/authorization.js";
+import { getDownlineSupervisorIds, buildAuthorizedView, mergeAuthorizedSave, resolveSectionPerm } from "../lib/authorization.js";
 
 function sampleData() {
   return {
     settings: { appName: "MM", dataSharing: true },
-    permissions: { superadmin: {}, admin: {}, user: {} },
+    // Role `user` gets Payments ("marathon") write by default in the real app (see ensure() in index.html).
+    // The empty matrix this fixture used before described a user with NO Payments access, which is not
+    // the production default and — now that the server enforces section permissions — would hide
+    // `transactions` from these downline-scoping tests. Products/Quotations are intentionally absent:
+    // in production those default to hidden for role `user` until a superadmin grants access.
+    permissions: { superadmin: {}, admin: {}, user: { marathon: "write" } },
     customSections: [],
     profiles: { sa: {}, sup_a: {}, sup_b: {}, sup_c: {} },
     users: [
@@ -19,7 +24,8 @@ function sampleData() {
       { ts: 2, user: "sa", action: "add", coll: "members", name: "M2", scopeId: "supC" },
     ],
     shared: {
-      transactions: [{ id: "t1", amount: 100 }],
+      // Payments carry the ownerId that saveTx stamps. t1 belongs to sup_c (downline of sup_b); t-up to sup_a (sup_b's UPLINE).
+      transactions: [{ id: "t1", amount: 100, ownerId: "sup_c" }, { id: "t-up", amount: 7, ownerId: "sup_a" }],
       gifts: [{ id: "g1" }],
       clients: [{ id: "c1", name: "Rahul Patel" }],
       // supA -> supB -> supC (B is downline of A, C is downline of B and A)
@@ -81,10 +87,11 @@ test("downline-scoped user only sees their own subtree, not siblings", () => {
   assert.deepEqual(view.shared.supervisors.map((s) => s.id).sort(), ["supB", "supC"]);
   assert.deepEqual(view.shared.coaches.map((c) => c.id), ["coachB"]);
   assert.deepEqual(view.shared.members.map((m) => m.id).sort(), ["m2", "m4"]);
-  // gifts/transactions/clients are NOT downline-filtered anywhere client-side — preserved as-is.
+  // gifts/clients are NOT downline-filtered — preserved as-is. TRANSACTIONS, however, are now owner-scoped (Data Scope
+  // feature): a non-superadmin sees only their own and their downline's payments, never an upline's or an unrelated user's.
+  assert.deepEqual(view.shared.transactions.map((t) => t.id), ["t1"], "t-up (owned by the upline sup_a) must not be served");
   assert.equal(view.shared.gifts.length, 1);
-  assert.equal(view.shared.transactions.length, 1);
-  assert.equal(view.shared.clients.length, 1, "shared.clients passes through unfiltered, same as transactions/gifts");
+  assert.equal(view.shared.clients.length, 1, "shared.clients passes through unfiltered, same as gifts");
   // Only their own perUser bucket, not sup_a's or sa's.
   assert.deepEqual(Object.keys(view.perUser), ["sup_b"]);
   assert.deepEqual(view.perUser.sup_b.clients, [], "sup_b's own (empty) clients bucket, not sup_a's");
@@ -207,13 +214,18 @@ test("activityLog is append-only and scoped: existing entries always survive, ne
   assert.ok(!merged.activityLog.some((a) => a.name === "New out-of-scope"));
 });
 
-test("a scoped user's own userPermissions override can be changed, but not anyone else's", () => {
+test("a scoped user cannot change ANY userPermissions entry — not anyone else's, and (now) not their own", () => {
+  // Previously a user could persist their own override, which was harmless only because the server never
+  // consulted userPermissions. resolveSectionPerm() now does, so a self-written override would be a
+  // self-service privilege escalation. The server's copy must win for every entry.
   const d = sampleData();
   const submitted = JSON.parse(JSON.stringify(d));
-  submitted.userPermissions = { sup_a: { club: "write" }, sup_b: { dashboard: "write" } };
+  submitted.userPermissions = { sup_a: { club: "write" }, sup_b: { dashboard: "write", products: "write" } };
   const merged = mergeAuthorizedSave(d, submitted, { uid: "sup_b", role: "user", linkedId: "supB" });
   assert.deepEqual(merged.userPermissions.sup_a, { club: "view" }, "must keep server value for someone else");
-  assert.deepEqual(merged.userPermissions.sup_b, { dashboard: "write" });
+  assert.equal(merged.userPermissions.sup_b, undefined, "the caller's own self-written override must be discarded");
+  assert.deepEqual(merged.userPermissions, d.userPermissions, "userPermissions is entirely the server's");
+  assert.equal(resolveSectionPerm(merged, { uid: "sup_b", role: "user" }, "products"), "hidden", "and it grants nothing");
 });
 
 // ---------------------------------------------------------------------------------------------
