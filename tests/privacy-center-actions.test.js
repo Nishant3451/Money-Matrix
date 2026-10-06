@@ -328,7 +328,19 @@ test("callWorkerApi: keeps the HTTP status on errors; 429 now matches the 'Too m
   assert.match(html, /callWorkerApi\("\/privacy\/export", \{\}, PRIVACY_CALL_OPTS\)/);
   assert.match(html, /callWorkerApi\("\/privacy\/request", \{ category, description \}, /);
   assert.match(html, /callWorkerApi\("\/privacy\/delete", \{ confirm: true \}, /);
-  for (const other of ['"/data/get", {}', '"/data/save", payload', '"/user/setPin", payload']) assert.ok(html.includes(`callWorkerApi(${other})`), `${other} unchanged (no timeout added)`);
+  const getAppDataMatch = html.match(/getAppDataFn\s*=\s*\(\)\s*=>\s*callWorkerApi\(\s*["']\/data\/get["'][\s\S]*?\);/);
+assert.ok(getAppDataMatch, "data fetch still uses callWorkerApi");
+assert.ok(!getAppDataMatch[0].includes("timeoutMs"), "data fetch does not opt into a timeout");
+assert.ok(
+  html.includes('callWorkerApi("/data/save", payload)') ||
+  html.includes('callWorkerApi("/data/save",payload)'),
+  'data save still uses callWorkerApi without a timeout'
+);
+assert.ok(
+  html.includes('callWorkerApi("/user/setPin", payload)') ||
+  html.includes('callWorkerApi("/user/setPin",payload)'),
+  'setPin still uses callWorkerApi without a timeout'
+);
 });
 
 test("Existing Privacy Center is intact: four policies, versions, read + accept path, sidebar entry", async () => {

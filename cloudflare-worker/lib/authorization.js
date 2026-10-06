@@ -138,38 +138,97 @@ export const canWriteSection = (data, caller, section) => resolveSectionPerm(dat
 //
 // MAXIMUM scope, computed here from the SERVER's data and the verified caller — never from the request:
 //   superadmin            -> everything ("all"), including legacy records that carry no ownerId
-//   admin / user / other  -> themselves + their downline ("mine_downline"). Admin gets NO "all": the old
+//   admin / user / other  -> themselves + their upline + their downline (whichever of those exist; see
+//                            resolveDataScope().maxScope). Admin gets NO "all": the old
 //                            "full-access roles see every record" behaviour is intentionally not applied
 //                            to these two collections.
-// "Upline" is deliberately NOT a scope: no existing rule lets any role see an upline's records, and
-// exposing a superior's payments/quotations would be a new privilege, not a view of existing ones.
+// UPLINE (read-only scope). Upline reuses the SAME tree — nothing new is invented:
+//   caller.linkedId -> that supervisor node -> its supervisorId -> that node's supervisorId -> ... (the ancestor nodes)
+//   upline users    = users whose linkedId is one of those ANCESTOR nodes (never the caller's own node).
+// The walk fails CLOSED: a cycle, a dangling supervisorId, a duplicated node id or a caller whose own node is missing
+// from the tree means the hierarchy cannot be trusted, so BOTH upline and downline are empty for that caller (only
+// "mine" remains). Upline is view-only: the write ceiling (applyOwnerScopeWriteGate) stays "mine_downline", so an
+// upline owner's records are served but can never be edited, deleted or re-attributed through /data/save.
 // A client may REQUEST a narrower scope; anything outside `allowed` is rejected, never widened.
 // ============================================================================================
-export const DATA_SCOPES = Object.freeze(["all", "mine_downline", "mine", "downline"]);
+export const DATA_SCOPES = Object.freeze([
+  "all", "mine", "upline", "downline", "mine_upline", "mine_downline", "upline_downline", "mine_upline_downline",
+]);
 export const SCOPED_COLLECTIONS = Object.freeze(["transactions", "quotations"]);
 
-/** @returns {{allowed:string[], defaultScope:string, owners:{mine:string[],downline:string[],mine_downline:string[]}, isSuper:boolean}} */
+/** Ancestor supervisor-node ids of `nodeId` (nearest first), or null when the tree is malformed (fail closed). */
+export function getUplineSupervisorIds(nodeId, supervisors) {
+  if (typeof nodeId !== "string" || !nodeId || !Array.isArray(supervisors)) return null;
+  const byId = new Map();
+  for (const s of supervisors) {
+    if (!s || typeof s.id !== "string" || !s.id) return null;
+    if (byId.has(s.id)) return null; // ambiguous node => cannot trust the parent chain
+    byId.set(s.id, s);
+  }
+  if (!byId.has(nodeId)) return null;
+  const chain = [];
+  const seen = new Set([nodeId]);
+  let cur = byId.get(nodeId);
+  while (cur.supervisorId !== null && cur.supervisorId !== undefined && cur.supervisorId !== "") {
+    const parent = cur.supervisorId;
+    if (typeof parent !== "string" || seen.has(parent) || !byId.has(parent)) return null; // cycle / dangling / non-string
+    seen.add(parent);
+    chain.push(parent);
+    cur = byId.get(parent);
+  }
+  return chain;
+}
+
+/** @returns {{allowed:string[], defaultScope:string, maxScope:string, owners:Object<string,string[]>, isSuper:boolean}} */
 export function resolveDataScope(fullData, caller) {
   const { uid, role, linkedId } = caller || {};
   const users = Array.isArray(fullData && fullData.users) ? fullData.users : [];
   const supervisors = (fullData && fullData.shared && fullData.shared.supervisors) || [];
-  const downlineNodes = linkedId ? getDownlineSupervisorIds(linkedId, supervisors) : new Set();
+  const validUid = typeof uid === "string" && uid ? uid : null;
+  let downlineNodes = linkedId ? getDownlineSupervisorIds(linkedId, supervisors) : new Set();
+  let ancestors = linkedId ? getUplineSupervisorIds(linkedId, supervisors) : null;
+  // Fail closed on a malformed / circular tree: the existing downline walk tolerates a cycle by absorbing the whole
+  // cycle (which would pull the caller's ANCESTORS into their "downline"), so any caller whose own chain is not a clean
+  // path to a root loses both directions rather than gaining records.
+  if (linkedId && ancestors === null) downlineNodes = new Set();
+  const uplineNodes = new Set(ancestors || []);
+  for (const n of uplineNodes) if (downlineNodes.has(n)) { downlineNodes = new Set(); uplineNodes.clear(); break; }
   const downline = [];
+  const upline = [];
   for (const u of users) {
-    if (u && typeof u.id === "string" && u.id !== uid && u.linkedId && downlineNodes.has(u.linkedId)) downline.push(u.id);
+    if (!u || typeof u.id !== "string" || u.id === validUid || !u.linkedId) continue;
+    if (downlineNodes.has(u.linkedId)) downline.push(u.id);
+    else if (uplineNodes.has(u.linkedId)) upline.push(u.id);
   }
-  const mine = typeof uid === "string" && uid ? [uid] : [];
+  const mine = validUid ? [validUid] : [];
+  const uniq = (...lists) => [...new Set(lists.flat())];
+  const owners = {
+    mine, upline, downline,
+    mine_upline: uniq(mine, upline),
+    mine_downline: uniq(mine, downline),
+    upline_downline: uniq(upline, downline),
+    mine_upline_downline: uniq(mine, upline, downline),
+  };
   const isSuper = role === "superadmin";
-  const hasDownline = downline.length > 0;
+  const hasUp = upline.length > 0;
+  const hasDown = downline.length > 0;
   const allowed = [];
   if (isSuper) allowed.push("all");
-  if (hasDownline) allowed.push("mine_downline");
   allowed.push("mine");
-  if (hasDownline) allowed.push("downline");
+  if (hasUp) allowed.push("upline");
+  if (hasDown) allowed.push("downline");
+  if (hasUp) allowed.push("mine_upline");
+  if (hasDown) allowed.push("mine_downline");
+  if (hasUp && hasDown) allowed.push("upline_downline", "mine_upline_downline");
+  const maxScope = isSuper ? "all" : hasUp && hasDown ? "mine_upline_downline" : hasUp ? "mine_upline" : hasDown ? "mine_downline" : "mine";
   return {
     allowed,
-    defaultScope: isSuper ? "all" : hasDownline ? "mine_downline" : "mine",
-    owners: { mine, downline, mine_downline: [...new Set([...mine, ...downline])] },
+    // What the UI selects first (unchanged from before upline existed): hierarchy BELOW the caller, never upline.
+    defaultScope: isSuper ? "all" : hasDown ? "mine_downline" : "mine",
+    // The widest scope this caller may hold. It is only ever SERVED when the client explicitly requests it (or a key
+    // that falls inside it); a request with no scope still gets defaultScope, exactly as before upline existed.
+    maxScope,
+    owners,
     isSuper,
   };
 }
@@ -236,7 +295,7 @@ function gateScopeForView(out, fullData, caller, ds, activeKey) {
     shared,
     perUser,
     activityLog,
-    dataScope: { allowed: ds.allowed, default: ds.defaultScope, active: activeKey, owners: ds.owners },
+    dataScope: { allowed: ds.allowed, default: ds.defaultScope, max: ds.maxScope, active: activeKey, owners: ds.owners },
   };
 }
 

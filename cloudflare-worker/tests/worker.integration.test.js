@@ -1017,7 +1017,7 @@ test("data scope / D,E,F: forged role, uid, userId, linkedId, permissions and 'a
 
 test("data scope / hostile scope values (wrong types, prototype keys, unknown names, 'upline') are rejected, null/absent use the default", async () => {
   const h = await scopeEnv();
-  for (const bad of [{ $ne: 1 }, ["all"], ["mine"], 1, true, "ALL", "upline", "everything", "__proto__", "constructor", "", "mine ", "mine,all"]) {
+  for (const bad of [{ $ne: 1 }, ["all"], ["mine"], 1, true, "ALL", "everything", "__proto__", "constructor", "", "mine ", "mine,all"]) {
     const r = await h.get("adm", { scope: bad });
     assert.equal(r.status, 403, JSON.stringify(bad)); assert.equal(r.json.error.code, "SCOPE_NOT_ALLOWED");
   }

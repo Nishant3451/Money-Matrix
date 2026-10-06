@@ -69,7 +69,7 @@ function makeEnv(fetchImpl) {
     fetch: fetchImpl,
     $: (id) => dom.window.document.getElementById(id),
     timeAgo: () => "now",
-    firebaseAvailable: true, cloudSyncStarted: true, writeTimer: null, pendingRemoteJson: null,
+    firebaseAvailable: true, cloudSyncStarted: true, requestedDataScope: null, writeTimer: null, pendingRemoteJson: null,
     isDirty: false, lastCloudJson: "", currentUser: { id: "u" }, serverViewReceived: false, applyingRemote: false,
     DB: {}, calls,
     forceLogout: (msg) => { calls.forceLogout.push(msg); ctx.beginSessionTermination(); },

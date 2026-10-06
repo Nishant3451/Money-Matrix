@@ -64,12 +64,12 @@ test("resolveDataScope: superadmin gets 'all'; admin and users NEVER do", () => 
 test("resolveDataScope: only offers scopes the server would accept (an unlinked user has no hierarchy, so only 'mine')", () => {
   const d = base();
   assert.deepEqual(resolveDataScope(d, caller(d, "nolink", "user")).allowed, ["mine"]);
-  assert.deepEqual(resolveDataScope(d, caller(d, "leaf", "user")).allowed, ["mine"], "a leaf has no downline");
-  assert.deepEqual(resolveDataScope(d, caller(d, "adm", "admin")).allowed, ["mine_downline", "mine", "downline"]);
+  assert.deepEqual(resolveDataScope(d, caller(d, "leaf", "user")).allowed, ["mine", "upline", "mine_upline"], "a leaf has no downline (only upline options)");
+  assert.deepEqual(resolveDataScope(d, caller(d, "adm", "admin")).allowed, ["mine", "upline", "downline", "mine_upline", "mine_downline", "upline_downline", "mine_upline_downline"]);
   assert.deepEqual(resolveDataScope(d, caller(d, "sa", "superadmin")).allowed, ["all", "mine"], "superadmin has no hierarchy node");
   for (const uid of ["adm", "low", "nolink", "sa"]) for (const k of resolveDataScope(d, caller(d, uid, uid === "sa" ? "superadmin" : "user")).allowed) assert.ok(DATA_SCOPES.includes(k));
 });
-test("I. hierarchy: downline = users at/below the caller's node (existing scopeUsers rule); upline and unrelated users are NEVER in any scope", () => {
+test("I. hierarchy: downline = users at/below the caller's node (existing scopeUsers rule); upline users are never in the DOWNLINE or the default scope", () => {
   const d = base();
   const ds = resolveDataScope(d, caller(d, "adm", "admin"));
   assert.deepEqual([...ds.owners.downline].sort(), ["leaf", "low", "peer"], "peer shares adm's node => treated as downline, exactly like members/coaches already are");
@@ -77,14 +77,14 @@ test("I. hierarchy: downline = users at/below the caller's node (existing scopeU
   for (const forbidden of ["top", "other", "sa", "nolink"]) assert.ok(!ds.owners.mine_downline.includes(forbidden), forbidden);
   const lowDs = resolveDataScope(d, caller(d, "low", "user"));
   assert.deepEqual(lowDs.owners.downline, ["leaf"]);
-  assert.ok(!lowDs.owners.mine_downline.includes("adm") && !lowDs.owners.mine_downline.includes("top"), "no upline, ever");
+  assert.ok(!lowDs.owners.mine_downline.includes("adm") && !lowDs.owners.mine_downline.includes("top"), "upline is never part of the downline / default scope");
 });
 test("resolveRequestedScope: absent => default; valid => accepted; unknown / wrong type / prototype keys => rejected", () => {
   const d = base(); const ds = resolveDataScope(d, caller(d, "adm", "admin"));
   assert.deepEqual(resolveRequestedScope(ds, undefined), { ok: true, key: "mine_downline" });
   assert.deepEqual(resolveRequestedScope(ds, null), { ok: true, key: "mine_downline" });
   assert.deepEqual(resolveRequestedScope(ds, "mine"), { ok: true, key: "mine" });
-  for (const bad of ["all", "ALL", "upline", "everything", "", " mine", "__proto__", "constructor", "toString", 1, true, {}, [], ["mine"], { $ne: 1 }]) {
+  for (const bad of ["all", "ALL", "UPLINE", "upline_all", "everything", "", " mine", "__proto__", "constructor", "toString", 1, true, {}, [], ["mine"], { $ne: 1 }]) {
     assert.equal(resolveRequestedScope(ds, bad).ok, false, JSON.stringify(bad));
   }
 });
@@ -189,7 +189,8 @@ test("activity-log entries naming Payments/Quotations are limited to in-scope ac
 });
 test("dataScope descriptor is server-computed and consistent with what was served", () => {
   const d = base(); const v = view(d, "adm", "admin", "downline");
-  assert.deepEqual(v.dataScope.allowed, ["mine_downline", "mine", "downline"]);
+  assert.deepEqual(v.dataScope.allowed, ["mine", "upline", "downline", "mine_upline", "mine_downline", "upline_downline", "mine_upline_downline"]);
+  assert.equal(v.dataScope.max, "mine_upline_downline");
   assert.equal(v.dataScope.default, "mine_downline"); assert.equal(v.dataScope.active, "downline");
   assert.deepEqual([...v.dataScope.owners.downline].sort(), ["leaf", "low", "peer"]);
 });

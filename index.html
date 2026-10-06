@@ -802,14 +802,14 @@ function stopCloudSync(){
 function beginSessionTermination(){
   if (sessionEnding) return false;
   sessionEnding = true;
-  authGeneration++;
+  authGeneration++; requestedDataScope = null;
   if (typeof writeTimer !== "undefined" && writeTimer) { clearTimeout(writeTimer); writeTimer = null; }
   pendingRemoteJson = null;
   stopCloudSync();
   return true;
 }
 // Called when a fresh login begins, so its requests run under a new, live generation.
-function beginSession(){ sessionEnding = false; authGeneration++; }
+function beginSession(){ sessionEnding = false; authGeneration++; requestedDataScope = null; }
 
 // Thin replacement for Firebase's httpsCallable(): same {data: ...} response shape and same
 // thrown-error-with-.code convention (existing catch blocks check e.code ===
@@ -890,6 +890,7 @@ async function callWorkerApi(path, body, opts) {
   return out;
 }
 
+let requestedDataScope = null; // widest scope the SERVER told us we may hold (descriptor.max); null = ask for the default
 let fbApp=null, db=null, DOC=null, META=null, auth=null, setUserPinFn=null, saveAppDataFn=null, getAppDataFn=null;
 if (firebaseAvailable) {
   try {
@@ -910,7 +911,9 @@ if (firebaseAvailable) {
     await setPersistence(auth, browserSessionPersistence);
     setUserPinFn = (payload) => callWorkerApi("/user/setPin", payload);
     saveAppDataFn = (payload) => callWorkerApi("/data/save", payload);
-    getAppDataFn = () => callWorkerApi("/data/get", {});
+    // `requestedDataScope` is only ever a REQUEST (set from the server's own descriptor, see fetchAuthorizedData); the Worker
+    // re-validates it against the verified identity + stored hierarchy and rejects anything it does not allow.
+    getAppDataFn = () => callWorkerApi("/data/get", requestedDataScope ? { scope: requestedDataScope } : {});
     // Cloud sync only ever begins once Firebase has actually confirmed a signed-in user —
     // see startCloud(), which now checks auth.currentUser before subscribing. This listener
     // is what (re)starts sync both right after a fresh login and after a same-tab reload
@@ -1235,8 +1238,24 @@ async function fetchAuthorizedData(){
   if(sessionEnding) return;
   const gen = authGeneration;
   try{
-    const result = await getAppDataFn();
+    let result;
+    try{ result = await getAppDataFn(); }
+    catch(e1){
+      // A remembered scope that the server no longer accepts (hierarchy changed, different account): drop it and ask for the default.
+      if(!requestedDataScope) throw e1;
+      requestedDataScope = null; result = await getAppDataFn();
+    }
     if(gen !== authGeneration || sessionEnding) return; // response for a session that no longer exists
+    // Upline support: the default response carries only "My Data + Downline"; when the server's descriptor says a wider
+    // scope (Upline) is allowed, ask for it once and keep asking on later syncs. The server decides; this only requests.
+    try{
+      const ds0 = JSON.parse(result.data.json).dataScope;
+      if(ds0 && typeof ds0.max === "string" && ds0.max !== ds0.active && Array.isArray(ds0.allowed) && ds0.allowed.includes(ds0.max) && requestedDataScope !== ds0.max){
+        requestedDataScope = ds0.max;
+        result = await getAppDataFn();
+        if(gen !== authGeneration || sessionEnding) return;
+      }
+    }catch(e2){ requestedDataScope = null; }
     const newJson = result.data.json;
     setSync("✓ Data Synchronized");
     if(newJson === lastCloudJson){ serverViewReceived = true; enforcePolicyGate(); return; }
@@ -2537,7 +2556,7 @@ function computePaymentTotals(transactions){
    what was already authorized and can never widen it. Pipeline:  authorized data (server) -> scope -> payment status.
    The totals cards deliberately keep using the full authorized set, so they do not move when these filters change. */
 let serverDataScope = null;               // null in local/offline mode and before the first sync: no server scope exists
-const SCOPE_LABELS = { all:"All Data", mine_downline:"My Data + Downline", mine:"My Data", downline:"My Downline" };
+const SCOPE_LABELS = { all:"All Data", mine:"My Data", upline:"My Upline", downline:"My Downline", mine_upline:"My Data + Upline", mine_downline:"My Data + Downline", upline_downline:"My Upline + Downline", mine_upline_downline:"My Data + Upline + Downline" };
 let maraScope = null, maraStatus = "all", quoteScope = null;
 const PAYMENT_STATUS_OPTIONS = [["all","All"],["pending","Pending"],["completed","Completed"]];
 function effectiveScopeKey(ds, chosen){ if(!ds || !Array.isArray(ds.allowed)) return null; return ds.allowed.includes(chosen) ? chosen : ds.default; }
