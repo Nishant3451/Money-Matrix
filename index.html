@@ -1617,7 +1617,16 @@ const commitItem = (coll, item, msg) => {
   const d = data();
   const i = d[coll].findIndex(x => x.id === item.id);
   const meta = ACTIVITY_LABELS[coll];
-  if (i >= 0) d[coll][i] = item; else d[coll].push(item);
+  if (i >= 0) {
+    // Ownership of an EXISTING Payment/Quotation never changes on edit. The item literal above stamps ownerId with the
+    // person doing the editing, which would silently hand a downline member's record to whoever edited it; the Worker now
+    // enforces the same rule (ownerId and acl are server-owned), so keep the stored values locally to stay consistent.
+    if ((coll === 'transactions' || coll === 'quotations') && d[coll][i]) {
+      if (d[coll][i].ownerId) item.ownerId = d[coll][i].ownerId;
+      if (d[coll][i].acl !== undefined) item.acl = d[coll][i].acl;
+    }
+    d[coll][i] = item;
+  } else d[coll].push(item);
   if(meta) logActivity(i>=0 ? 'updated' : 'added', coll, item[meta.nameKey], scopeIdFor(coll,item));
   save(true); closeModal(); render(); toast(msg);
 };

@@ -39,7 +39,8 @@ import {
 } from "./lib/googleFirestore.js";
 import { mintFirebaseCustomToken, setClaimsEnsuringUserExists, deleteAuthUser, revokeRefreshTokens } from "./lib/firebaseIdentity.js";
 import { verifyFirebaseIdToken } from "./lib/firebaseToken.js";
-import { buildAuthorizedView, mergeAuthorizedSave, isFullAccessRole, effectiveRole } from "./lib/authorization.js";
+import { buildAuthorizedView, mergeAuthorizedSave, isFullAccessRole, effectiveRole, buildRecordAccessContext } from "./lib/authorization.js";
+import { computeAclUpdate } from "./lib/recordAcl.js";
 import { authorizeSetUserPin } from "./lib/userPin.js";
 import {
   PRIVACY_REQUEST_CATEGORIES,
@@ -430,6 +431,70 @@ async function handleDataGet(request, env, cors) {
   } catch (e) {
     console.error("data/get error:", e && e.stack ? e.stack : e);
     return authError("Could not load data", 500, cors);
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// POST /record/acl -- the ONLY way a Payment's / Quotation's access list can change.
+//
+// /data/save can never carry `acl` or `ownerId` (see applyRecordAclToSave), so this narrow, validated endpoint is
+// the single writer. Body: { collection: "transactions"|"quotations", id, bucket?: <uid> (omit for shared-mode
+// records), baseRev: <integer, the rev you last saw; 0 if the record has no ACL yet>, grants: [{uid, perms:[...]}]
+// | null }.  `grants: []` = private; `grants: null` = back to inherit (owner/superadmin only).
+// Everything that decides the outcome -- caller identity, role, hierarchy, owner, current ACL, rev -- is read from
+// the server's own freshly-read copy of appData; nothing of that kind is ever taken from the request. Ownership
+// cannot be changed here (there is deliberately no owner field).
+// -------------------------------------------------------------------------------------------
+const MAX_RECORD_ACL_BODY_BYTES = 16 * 1024;
+const MAX_RECORD_ACL_WRITES_PER_WINDOW = 30;
+const RECORD_ACL_WINDOW_MS = 60 * 1000;
+
+async function handleRecordAcl(request, env, cors) {
+  const auth = await authenticateRequest(request, env);
+  if (auth.error) return authError(auth.error.message, auth.error.status, cors);
+
+  const read = await readBodyOrRespond(request, MAX_RECORD_ACL_BODY_BYTES, cors);
+  if (read.error) return read.error;
+  const body = read.value;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return authError("Invalid payload", 400, cors);
+  const bucket = body.bucket === undefined || body.bucket === null ? null : body.bucket;
+  const grants = body.grants === undefined ? undefined : body.grants;
+  if (grants === undefined) return authError("Invalid payload", 400, cors); // omitted != null: never an implicit "revert"
+
+  const rl = await checkAndReserveRateLimit(env, "record_acl", auth.uid, MAX_RECORD_ACL_WRITES_PER_WINDOW, RECORD_ACL_WINDOW_MS);
+  if (rl.misconfigured) {
+    console.error("record/acl rate limiting is misconfigured: RATE_LIMIT_KV binding is missing.");
+    return authError("Access changes are temporarily unavailable -- please try again shortly.", 503, cors);
+  }
+  if (!rl.allowed) return authError("Too many requests -- please try again later.", 429, cors);
+
+  try {
+    const accessToken = await getGoogleAccessToken(env);
+    for (let attempt = 0; attempt < MAX_DATA_SAVE_ATTEMPTS; attempt++) {
+      const { data: appData, updateTime } = await readAppDataWithVersion(env, accessToken);
+      const me = (appData.users || []).find((u) => u.id === auth.uid);
+      if (!me) return authError("Account not found", 403, cors);
+      if (!hasAcceptedAllCurrentPolicies(appData, auth.uid)) return policyAcceptanceRequiredError(cors, appData, auth.uid);
+
+      // Role/hierarchy re-derived on EVERY attempt from this attempt's fresh read (role freshness preserved).
+      const caller = { uid: auth.uid, role: effectiveRole(auth.role, me), linkedId: me.linkedId || null };
+      const ctx = buildRecordAccessContext(appData, caller);
+      const outcome = computeAclUpdate({ appData, ctx, collection: body.collection, bucket, id: body.id, baseRev: body.baseRev, grants });
+      if (outcome.error) {
+        const { status, code, message, ...extra } = outcome.error;
+        return jsonResponse({ error: { message, code, ...extra } }, status, cors);
+      }
+      if (!outcome.result.changed) return jsonResponse({ data: outcome.result }, 200, cors); // nothing to write
+
+      const write = await writeAppDataIfUnchanged(env, accessToken, outcome.appData, updateTime);
+      if (write.conflict) continue; // someone else wrote in between -- re-read and re-evaluate from scratch
+      await bumpMeta(env, accessToken);
+      return jsonResponse({ data: outcome.result }, 200, cors);
+    }
+    return jsonResponse({ error: { message: "This change conflicted with another update -- please try again.", code: "CONFLICT" } }, 409, cors);
+  } catch (e) {
+    console.error("record/acl error:", e && e.stack ? e.stack : e);
+    return authError("Could not update access", 500, cors);
   }
 }
 
@@ -1138,6 +1203,8 @@ export default {
         return handleDataGet(request, env, cors);
       case "/data/save":
         return handleDataSave(request, env, cors);
+      case "/record/acl":
+        return handleRecordAcl(request, env, cors);
       case "/user/setPin":
         return handleSetUserPin(request, env, cors);
       case "/privacy/consent":

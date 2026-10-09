@@ -27,6 +27,8 @@
 // data leak; server-side we scope-to-empty instead. See buildAuthorizedView below.)
 // ============================================================================================
 
+import { applyRecordAclToView, applyRecordAclToSave, stampScopedActivityEntry } from "./recordAcl.js";
+
 /**
  * Walks the supervisor->supervisor chain (verbatim port of getDownlineSupervisorIds in
  * index.html) and returns the root id plus every supervisor beneath it, at any depth. Guards
@@ -243,6 +245,23 @@ export function resolveRequestedScope(ds, requested) {
 const ownerSetForScope = (ds, key) => (key === "all" ? null : new Set(ds.owners[key] || []));
 const ownedBy = (rec, owners) => owners === null || (!!rec && typeof rec.ownerId === "string" && owners.has(rec.ownerId));
 
+/** Everything the record-ACL layer needs to decide for ONE caller, derived only from the verified caller and the
+ *  server's own copy of appData (never from the request): Data Scope ceilings + section permissions. */
+export function buildRecordAccessContext(fullData, caller) {
+  const ds = resolveDataScope(fullData, caller);
+  return {
+    uid: caller && typeof caller.uid === "string" ? caller.uid : null,
+    isSuper: !!caller && caller.role === "superadmin",
+    isFull: !!caller && isFullAccessRole(caller.role),
+    viewOwners: new Set(ds.owners.mine_upline_downline),
+    writeOwners: new Set(ds.owners.mine_downline),
+    section: {
+      transactions: resolveSectionPerm(fullData, caller, "marathon"),
+      quotations: resolveSectionPerm(fullData, caller, "quotations"),
+    },
+  };
+}
+
 function scopeError() {
   return Object.assign(new Error("Requested data scope is not allowed"), { code: "SCOPE_NOT_ALLOWED" });
 }
@@ -288,7 +307,11 @@ function gateScopeForView(out, fullData, caller, ds, activeKey) {
         if (dn) actors.add(dn);
       }
     }
-    activityLog = (out.activityLog || []).filter((a) => !a || !SCOPED_COLLECTIONS.includes(a.coll) || actors.has(a.user));
+    // Entries stamped by the server with a verified actorUid are scoped by that uid. Only legacy entries (no actorUid) still fall
+    // back to the name match above, which the record-ACL layer then fails closed on for any collection that uses ACLs.
+    activityLog = (out.activityLog || []).filter(
+      (a) => !a || !SCOPED_COLLECTIONS.includes(a.coll) || (typeof a.actorUid === "string" && a.actorUid ? owners.has(a.actorUid) : actors.has(a.user))
+    );
   }
   return {
     ...out,
@@ -504,7 +527,9 @@ export function buildAuthorizedView(fullData, caller, opts = {}) {
   const ds = resolveDataScope(fullData, caller);
   const requested = resolveRequestedScope(ds, opts && opts.scope);
   if (!requested.ok) throw scopeError();
-  return gateScopeForView(sectionGated, fullData, caller, ds, requested.key);
+  const scoped = gateScopeForView(sectionGated, fullData, caller, ds, requested.key);
+  // Record-level ACL: the final, per-record layer. It can only remove records / hide ACL details, never add.
+  return applyRecordAclToView(scoped, fullData, buildRecordAccessContext(fullData, caller));
 }
 
 export function emptyPerUserBucket() {
@@ -524,7 +549,10 @@ export function emptyPerUserBucket() {
  */
 export function mergeAuthorizedSave(serverData, submitted, caller) {
   const sectionGated = applySectionWriteGate(mergeAuthorizedSaveScoped(serverData, submitted, caller), serverData, caller);
-  return applyOwnerScopeWriteGate(sectionGated, serverData, caller);
+  const scopeGated = applyOwnerScopeWriteGate(sectionGated, serverData, caller);
+  // Record-level ACL (runs for EVERY role, superadmin included): enforces EDIT / DELETE per record and makes `acl` and
+  // `ownerId` server-owned -- they are always taken from serverData, never from the submitted blob.
+  return applyRecordAclToSave(scopeGated, serverData, buildRecordAccessContext(serverData, caller), submitted);
 }
 
 function mergeAuthorizedSaveScoped(serverData, submitted, caller) {
@@ -549,7 +577,7 @@ function mergeAuthorizedSaveScoped(serverData, submitted, caller) {
       userPermissions: role === "superadmin" && isPlainObject(submitted.userPermissions) ? submitted.userPermissions : serverData.userPermissions || {},
       shared: isPlainObject(submitted.shared) ? submitted.shared : serverData.shared || {},
       perUser: isPlainObject(submitted.perUser) ? submitted.perUser : serverData.perUser || {},
-      activityLog: mergeActivityLog(serverData.activityLog, submitted.activityLog, () => true),
+      activityLog: mergeActivityLog(serverData.activityLog, submitted.activityLog, () => true, uid),
       // Privacy fields (Part B): ALWAYS carried forward from the server's existing state,
       // for every caller including admin/superadmin. These are only ever mutated by the
       // dedicated /privacy/* endpoints, which apply one narrow, validated, audited change at a
@@ -609,7 +637,7 @@ function mergeAuthorizedSaveScoped(serverData, submitted, caller) {
     perUser: mergedPerUser,
     // Append-only: a scoped caller may add new entries scoped to their own downline, but can
     // never remove or rewrite existing entries (matches "activityLog append-only behavior").
-    activityLog: mergeActivityLog(serverData.activityLog, submitted.activityLog, (a) => a.scopeId && downlineIds.has(a.scopeId)),
+    activityLog: mergeActivityLog(serverData.activityLog, submitted.activityLog, (a) => a.scopeId && downlineIds.has(a.scopeId), uid),
     // See the full-access branch above for why these are always passed through untouched.
     ...privacyPassthrough(serverData),
   };
@@ -627,6 +655,8 @@ function privacyPassthrough(serverData) {
     privacyPreferences: serverData.privacyPreferences || {},
     privacyRequests: serverData.privacyRequests || [],
     privacyAuditLog: serverData.privacyAuditLog || [],
+    // Server-owned audit trail of record-ACL changes (written only by /record/acl).
+    recordAclAudit: serverData.recordAclAudit || [],
   };
 }
 
@@ -672,11 +702,12 @@ function mergeScopedArray(serverArr, submittedArr, inScope) {
 }
 
 /** Append-only merge: keep every existing entry, add only new, authorized entries. */
-function mergeActivityLog(serverLog, submittedLog, canAppend) {
+function mergeActivityLog(serverLog, submittedLog, canAppend, actorUid) {
   serverLog = Array.isArray(serverLog) ? serverLog : [];
   submittedLog = Array.isArray(submittedLog) ? submittedLog : [];
   const known = new Set(serverLog.map((e) => activityKey(e)));
-  const additions = submittedLog.filter((e) => e && !known.has(activityKey(e)) && canAppend(e));
+  // New Payment/Quotation entries are stamped server-side with the verified actor uid (see stampScopedActivityEntry).
+  const additions = submittedLog.filter((e) => e && !known.has(activityKey(e)) && canAppend(e)).map((e) => stampScopedActivityEntry(e, actorUid));
   // New entries are unshifted client-side (most-recent-first) — keep that convention.
   return [...additions, ...serverLog];
 }
