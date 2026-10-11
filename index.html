@@ -625,7 +625,7 @@
         <div class="form-group"><label>Username</label><input id="usernameInput" type="text" placeholder="Username" /></div>
         <div class="form-group">
           <label for="pinInput">PIN</label>
-          <input id="pinInput" class="login-pin-input" type="password" minlength="8" maxlength="16" autocomplete="current-password" placeholder="Enter PIN" />
+          <input id="pinInput" class="login-pin-input" type="password" minlength="4" maxlength="16" autocomplete="current-password" placeholder="Enter PIN" />
         </div>
         <div style="display:flex;align-items:center;justify-content:flex-start;gap:8px;margin-bottom:20px;text-align:left">
           <input type="checkbox" id="rememberMe" style="width:16px;height:16px;accent-color:var(--primary);cursor:pointer">
@@ -1650,7 +1650,7 @@ async function assignAfterSave(savePromise, coll, id, bucket, expectedOwner, tar
 }
 // Display name for a person id (profile name, falling back to the username, then the id).
 function ownerLabel(uid){
-  if(!uid) return "Unassigned (legacy record)";
+  if(!uid) return "Unassigned";
   const u = (DB.users||[]).find(x=>x.id===uid);
   const dn = DB.profiles && DB.profiles[uid] && DB.profiles[uid].displayName;
   return dn || (u && u.username) || String(uid);
@@ -1828,7 +1828,7 @@ window.showSupervisorLoginModal = (oldType, id) => {
         <div class="modal-head"><h3>Create Supervisor Login: ${esc(person.name)}</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
         <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:16px;line-height:1.4">A username and PIN have been suggested automatically — edit them yourself, or tap Regenerate for a new suggestion.</p>
         <div class="form-group"><label>Login Username</label><input id="promo_user" value="${esc(suggestUsername(person.name))}"></div>
-        <div class="form-group"><label>PIN (min 4 digits)</label><input id="promo_pin" maxlength="16" value="${esc(suggestPin())}"></div>
+        <div class="form-group"><label>PIN (4-16 characters)</label><input id="promo_pin" minlength="4" maxlength="16" value="${esc(suggestPin())}"></div>
         <button class="btn btn-gray" style="width:100%;margin-bottom:14px" onclick="regenerateSuggestion(${sj(person.name)})"><i class="fas fa-dice"></i> Regenerate Suggestion</button>
         <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-purple" onclick="confirmSupervisorPromotion(${sj(oldType)},${sj(id)})"><i class="fas fa-check"></i> Create & Promote</button></div>
     `);
@@ -1837,7 +1837,7 @@ window.regenerateSuggestion = (name) => { $("promo_user").value = suggestUsernam
 window.confirmSupervisorPromotion = async (oldType, id) => {
     const uname = $("promo_user").value.trim(), pin = $("promo_pin").value.trim();
     if(!uname) return toast("Username required");
-    if(!pin || pin.length < 4) return toast("PIN must be at least 4 digits");
+    if(pin.length < 4 || pin.length > 16) return toast("PIN must be 4-16 characters");
     if(DB.users.some(u=>u.username.toLowerCase()===uname.toLowerCase())) return toast("Username already exists!");
     if(firebaseAvailable){
       try{
@@ -2677,11 +2677,12 @@ function renderMarathonResults(){
   if(note) note.textContent = serverDataScope ? scopeNoteText(maraScope, rows.length, inScope.length, "payments", paymentStatusKey(maraStatus)!=="all" ? ` · Status: ${paymentStatusKey(maraStatus)==="pending"?"Pending":"Completed"}` : "") + ". Totals above cover everything you are authorized to see." : "";
   const el=$("marathon_results"); if(!el) return;
   el.innerHTML = rows.length?
-        `<table><thead><tr><th>Date</th><th>Customer</th><th>Product/Note</th><th>Type</th><th>Amount</th><th>Status</th>${canWrite('marathon')?'<th>Actions</th>':''}</tr></thead><tbody>`+
+        `<table><thead><tr><th>Date</th><th>Customer</th><th>Product/Note</th><th>Assigned To</th><th>Type</th><th>Amount</th><th>Status</th>${canWrite('marathon')?'<th>Actions</th>':''}</tr></thead><tbody>`+
         rows.map(tx=>`<tr>
           <td data-label="Date">${fmtDate(tx.date)}</td>
           <td data-label="Customer"><div style="display:flex;gap:10px;align-items:flex-start">${avatarChip(tx.customer)}<div><div style="font-weight:700;color:var(--text)">${tx.clientId?`<a href="#" onclick='event.preventDefault();clientProfileModal(${sj(tx.clientId)})' style="color:inherit;text-decoration:underline;text-decoration-style:dotted;cursor:pointer">${esc(dispName(tx.customer))}</a>`:esc(dispName(tx.customer))}</div>${tx.lastEditedBy ? `<div style="font-size:.7rem;color:var(--text-muted);font-weight:500;margin-top:4px;letter-spacing:0"><i class="fas fa-user-edit" style="font-size:.65rem;margin-right:3px"></i> ${esc(tx.lastEditedBy)}</div>` : ''}</div></div></td>
           <td data-label="Details">${esc(tx.product||"")}${tx.notes?`<div style="font-size:.75rem;color:var(--text-muted);margin-top:4px">${esc(tx.notes)}</div>`:""}</td>
+          <td data-label="Assigned To"><span class="badge bg-purple">${esc(ownerLabel(tx.ownerId || (!DB.settings.dataSharing ? viewingAs||currentUser.id : null)))}</span></td>
           <td data-label="Type"><span class="badge ${tx.type==='sent'?'bg-red':'bg-green'}">${tx.type==='sent'?'Sent (Debit)':'Received (Credit)'}</span></td>
           <td data-label="Amount" style="font-weight:800;font-size:1.05rem;color:${tx.type==='sent'?'#dc2626':'#059669'}">${tx.type==='sent'?'-':'+'}${money(tx.amount)}</td>
           <td data-label="${t('status')}"><span class="badge ${tx.status==='completed'?'bg-gray':'bg-amber'}">${tx.status}</span></td>
@@ -3386,7 +3387,7 @@ window.supModal=(s={})=>{
   <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
   <p style="font-size:.8rem;color:var(--text-muted);margin-bottom:12px;line-height:1.4"><i class="fas fa-key" style="margin-right:4px"></i>Login access (optional) — set manually, or tap Auto-fill. Leave Login ID blank to remove login access${linkedUser?' for this supervisor':''}.</p>
   <div class="form-group"><label>Login ID (Username)</label><input id="s_user" value="${esc(linkedUser?.username||"")}"></div>
-  <div class="form-group"><label>PIN${linkedUser?' (leave blank to keep current)':' (min 4 digits)'}</label><input id="s_pin" value="" placeholder="${linkedUser?'••••':'e.g. 1234'}"></div>
+  <div class="form-group"><label>PIN${linkedUser?' (leave blank to keep current)':' (4-16 characters)'}</label><input id="s_pin" minlength="4" maxlength="16" value="" placeholder="${linkedUser?'••••':'e.g. 1234'}"></div>
   <button type="button" class="btn btn-gray" style="width:100%;margin-bottom:14px" onclick="autoFillSupLogin()"><i class="fas fa-dice"></i> Auto-fill Suggestion</button>
   <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick='saveSup(${sj(s.id||"")})'>Save</button></div>`);
 };
@@ -3413,7 +3414,7 @@ window.saveSup=async id=>{
   if (uname) {
     const dupe = DB.users.find((u,i) => i !== existingIdx && u.username.toLowerCase() === uname.toLowerCase());
     if (dupe) return toast("That Login ID is already taken by another account");
-    if (pin && pin.length < 4) return toast("PIN must be at least 4 digits");
+    if (pin && (pin.length < 4 || pin.length > 16)) return toast("PIN must be 4-16 characters");
     if (existingIdx >= 0) {
       const oldId = DB.users[existingIdx].id;
       const renaming = oldId !== uname;
@@ -3442,7 +3443,7 @@ window.saveSup=async id=>{
       DB.users[existingIdx].username = uname;
       if (!firebaseAvailable && pin) DB.users[existingIdx].pin = pin;
     } else {
-      if (!pin || pin.length < 4) return toast("Set a PIN (min 4 digits) to create this login");
+      if (pin.length < 4 || pin.length > 16) return toast("PIN must be 4-16 characters");
       if(firebaseAvailable){
         try{ await setUserPinFn({ targetUserId: uname, newPin: pin, role: 'supervisor' }); }
         catch(e){ toast("Couldn't create the login — try again"); return; }
@@ -5185,7 +5186,7 @@ window.userModal=(id)=>{
   showModal(`<div class="modal-head"><h3>${u?"Modify Configuration":"Provision Account"}</h3><button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button></div>
     <div class="form-group"><label>Display Alias</label><input id="u_name" value="${esc(p.displayName||"")}"></div>
     <div class="form-group"><label>Username</label><input id="u_user" value="${esc(u?u.username:"")}" ${u && !isSuperAdmin() ? "disabled":""}></div>
-    <div class="form-group"><label>PIN${u?" (leave blank to keep current)":""}</label><input id="u_pin" inputmode="numeric" maxlength="16" value="" placeholder="${u?'••••':'e.g. 1234'}"></div>
+    <div class="form-group"><label>PIN${u?" (leave blank to keep current)":" (4-16 characters)"}</label><input id="u_pin" minlength="4" maxlength="16" value="" placeholder="${u?'••••':'e.g. 1234'}"></div>
     <div class="form-group"><label>Security Level (Role)</label><select id="u_role" ${u && (u.id===currentUser.id || (u.role==='superadmin' && !isDeveloper())) ? "disabled" : ""}>${roleOptions}</select></div>
     <div class="form-group"><label>Linked Staff Profile (For Data Scoping)</label><select id="u_link">${linkedOptions}</select></div>
     <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Abort</button><button class="btn btn-primary" onclick='saveUser(${sj(id||"")})'>Execute Provision</button></div>`);
@@ -5196,8 +5197,7 @@ window.saveUser=async id=>{
   let role = $("u_role") ? $("u_role").value : 'user';
   const linkedId = $("u_link").value;
 
-  if(!id && pin.length<4){ toast("Set a PIN (min 4 digits) to create this login"); return; }
-  if(pin && pin.length<4){ toast("PIN must be at least 4 digits"); return; }
+  if((!id || pin) && (pin.length<4 || pin.length>16)){ toast("PIN must be 4-16 characters"); return; }
   if(id){ 
     const u=DB.users.find(x=>x.id===id); 
     if (!canManageAccount(u)) { toast("You don't have permission to edit this account"); return; }
@@ -5259,9 +5259,9 @@ window.savePrefs=async(btnEl)=>{ DB.profiles[currentUser.id].dateFormat=$("p_dat
 function renderSettings(){
   $("pageBody").innerHTML=`
     <div class="card" style="max-width:600px;margin:0 auto"><div class="card-head"><span class="card-title"><i class="fas fa-key" style="color:var(--primary);margin-right:10px"></i> Change PIN</span></div>
-      <div class="form-group"><label for="s_cur">Current PIN</label><input id="s_cur" type="password" autocomplete="current-password"></div>
-      <div class="form-group"><label for="s_new">New PIN (8-16 Characters)</label><input id="s_new" type="password" minlength="8" maxlength="16" autocomplete="new-password"></div>
-      <div class="form-group"><label for="s_conf">Confirm New PIN</label><input id="s_conf" type="password" minlength="8" maxlength="16" autocomplete="new-password"></div>
+      <div class="form-group"><label for="s_cur">Current PIN</label><input id="s_cur" type="password" minlength="4" maxlength="16" autocomplete="current-password"></div>
+      <div class="form-group"><label for="s_new">New PIN (4-16 characters)</label><input id="s_new" type="password" minlength="4" maxlength="16" autocomplete="new-password"></div>
+      <div class="form-group"><label for="s_conf">Confirm New PIN</label><input id="s_conf" type="password" minlength="4" maxlength="16" autocomplete="new-password"></div>
       <button class="btn btn-primary" style="width:100%;margin-top:10px" onclick="changePin()">Update PIN</button>
     </div>
     <div class="card" style="max-width:600px;margin:22px auto 0" id="bioSettingsCard">
@@ -5279,7 +5279,7 @@ function renderSettings(){
 }
 window.changePin=async ()=>{
   const c=$("s_cur").value.trim(),n=$("s_new").value.trim(),cf=$("s_conf").value.trim();
-  if(n.length<8 || n.length>16){ toast("PIN must be 8-16 characters"); return; }
+  if(n.length<4 || n.length>16){ toast("PIN must be 4-16 characters"); return; }
   if(n!==cf){ toast("PINs don't match"); return; }
   if(!firebaseAvailable){
     // Local-only fallback account (see doLogin) — no server to verify against.

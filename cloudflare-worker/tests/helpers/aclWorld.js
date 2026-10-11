@@ -2,6 +2,7 @@
 // (Lives in helpers/ so node --test's *.test.js glob does not treat it as a test file.)
 import assert from "node:assert/strict";
 import { webcrypto, generateKeyPairSync } from "node:crypto";
+import bcrypt from "bcryptjs";
 import { encodeFirestoreFields } from "../../lib/googleFirestore.js";
 import { resolveDataScope } from "../../lib/authorization.js";
 import worker from "../../login-worker.js";
@@ -38,6 +39,7 @@ export const USERS = [
   { id: "low", username: "low", role: "user", linkedId: "n_low" },
   { id: "peer", username: "peer", role: "user", linkedId: "n_peer" },
 ];
+const TEST_PIN_HASH = bcrypt.hashSync("fixture-pin", 4);
 export const MAX_SCOPE = { root: "all", top: "mine_downline", mid: "mine_upline_downline", low: "mine_upline", peer: "mine_upline" };
 export const rec = (id, ownerId, extra = {}) => ({ id, ownerId, customer: `cust-${id}`, amount: 100, ...extra });
 export const g = (uid, ...perms) => ({ uid, perms: ["view", ...perms] });
@@ -55,6 +57,7 @@ export function makeDoc({ tx = [], q = [], perUser = {}, activityLog = [], extra
 /** A Worker + fake Firestore (versioned, with precondition) for one test. */
 export function makeWorld(initial, { kv = true } = {}) {
   const state = { doc: initial, version: "v0", n: 0 };
+  const testCredentials = Object.fromEntries((initial.users || []).map((u) => [u.id, { pinHash: TEST_PIN_HASH, role: u.role }]));
   const world = { state, beforePatch: null, patchCount: 0, conflicts: 0 };
   world.env = { FIREBASE_PROJECT_ID: PROJECT_ID, FIREBASE_CLIENT_EMAIL: "svc@x.iam.gserviceaccount.com", FIREBASE_PRIVATE_KEY: svcKey, ALLOWED_ORIGIN: ORIGIN };
   if (kv) world.env.RATE_LIMIT_KV = { async get() { return null; }, async put() {} };
@@ -75,6 +78,9 @@ export function makeWorld(initial, { kv = true } = {}) {
           state.n += 1; state.version = `v${state.n}`;
           return new Response(JSON.stringify({ updateTime: state.version }), { status: 200 });
         }
+      }
+      if (u.includes("moneymatrix/credentials") && method === "GET") {
+        return new Response(JSON.stringify({ fields: encodeFirestoreFields(testCredentials), updateTime: "c0" }), { status: 200 });
       }
       if (u.includes("moneymatrix/meta")) return new Response("{}", { status: 200 });
       throw new Error(`Unmocked fetch: ${method} ${u}`);

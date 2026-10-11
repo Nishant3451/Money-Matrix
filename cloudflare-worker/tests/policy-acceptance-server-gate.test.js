@@ -15,12 +15,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto, generateKeyPairSync } from "node:crypto";
+import bcrypt from "bcryptjs";
 import worker from "../login-worker.js";
 import { hasAcceptedAllCurrentPolicies, currentPublishedPolicySummary, POLICY_TYPES } from "../lib/privacy.js";
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const PROJECT_ID = "money-metrix-9f1da";
+const TEST_PIN_HASH = bcrypt.hashSync("fixture-pin", 4);
 let kidCounter = 0;
 const nextKid = () => `pag-kid-${++kidCounter}`;
 
@@ -66,6 +68,10 @@ function installFakeFetch(env, jwk) {
     if (u.includes("firestore.googleapis.com") && u.includes("moneymatrix/appData")) {
       if (method === "GET") return new Response(JSON.stringify({ fields: encodeFirestoreFields({ json: JSON.stringify(env.__state.appData) }) }), { status: 200 });
       if (method === "PATCH") { env.__state.appData = JSON.parse(body.fields.json.stringValue); return new Response(JSON.stringify({}), { status: 200 }); }
+    }
+    if (u.includes("firestore.googleapis.com") && u.includes("moneymatrix/credentials") && method === "GET") {
+      const credentials = Object.fromEntries((env.__state.appData.users || []).map((u) => [u.id, { pinHash: TEST_PIN_HASH, role: u.role }]));
+      return new Response(JSON.stringify({ fields: encodeFirestoreFields(credentials) }), { status: 200 });
     }
     if (u.includes("firestore.googleapis.com") && u.includes("moneymatrix/meta")) return new Response(JSON.stringify({}), { status: 200 });
     throw new Error(`Unmocked fetch: ${method} ${u}`);

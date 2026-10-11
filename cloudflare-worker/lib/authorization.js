@@ -273,21 +273,28 @@ const ownedBy = (rec, owners) => owners === null || (!!rec && typeof rec.ownerId
  * The server-authorized list of people `caller` may assign a record of `collection` to (the "Assigned To" picker, and the
  * validation behind both /record/assign and a brand-new record's owner).
  *   * WRITE on the section is required -- without it the caller cannot create or edit these records at all;
- *   * All-Data holders (Developer; superadmin unless the policy removed All Data): any ACTIVE user;
+ *   * All-Data holders (Developer; superadmin unless the policy removed All Data): any ACTIVE login account;
  *     everyone else: themselves or their own mine+downline hierarchy -- never upline, never unrelated users;
- *   * the target must be active (not disabled) and hold at least "view" on the section, or the record would vanish for them.
+ *   * the target must be active, have a valid credentials-document PIN hash, and hold at least "view" on the section.
+ *     Production callers pass the authoritative credentials document; target role is not an eligibility restriction.
  * @returns {Array<{uid:string, name:string, username:string}>} (no PINs, no hierarchy ids, no roles)
  */
-export function assignableTargets(appData, caller, collection) {
+export function assignableTargets(appData, caller, collection, credentials) {
   const section = collection === "transactions" ? "marathon" : collection === "quotations" ? "quotations" : null;
   if (!section || !caller || typeof caller.uid !== "string") return [];
   if (resolveSectionPerm(appData, caller, section) !== "write") return [];
   const ds = resolveDataScope(appData, caller);
   const writeOwners = new Set(ds.owners.mine_downline); // mine + downline (disabled users are never in the downline)
+  const hasCredentialRecord = (uid) => {
+    if (credentials === undefined) return true; // Pure authorization callers without credential context retain existing behavior.
+    const entry = credentials && isPlainObject(credentials) ? credentials[uid] : null;
+    return !!entry && typeof entry.pinHash === "string"
+      && /^\$2[aby]\$(0[4-9]|[12][0-9]|3[01])\$[./A-Za-z0-9]{53}$/.test(entry.pinHash);
+  };
   const out = [];
   const seen = new Set();
   for (const u of Array.isArray(appData && appData.users) ? appData.users : []) {
-    if (!isActiveUser(u) || seen.has(u.id)) continue;
+    if (!isActiveUser(u) || !hasCredentialRecord(u.id) || seen.has(u.id)) continue;
     seen.add(u.id);
     if (!ds.isSuper && !writeOwners.has(u.id)) continue;
     if (resolveSectionPerm(appData, { uid: u.id, role: u.role }, section) === "hidden") continue;
@@ -302,7 +309,7 @@ export function assignableTargets(appData, caller, collection) {
 /** Everything the record-ACL layer needs to decide for ONE caller, derived only from the verified caller and the
  *  server's own copy of appData (never from the request): Data Scope ceilings + section permissions.
  *  `isSuper` = holds All Data (Developer; superadmin unless the Developer-controlled policy removed it). */
-export function buildRecordAccessContext(fullData, caller) {
+export function buildRecordAccessContext(fullData, caller, credentials) {
   const ds = resolveDataScope(fullData, caller);
   const targets = {};
   return {
@@ -318,7 +325,7 @@ export function buildRecordAccessContext(fullData, caller) {
     },
     /** Set of uids a NEW record of `collection` may be owned by when this caller creates it (memoized). */
     assignable(collection) {
-      if (!hasOwn(targets, collection)) targets[collection] = new Set(assignableTargets(fullData, caller, collection).map((t) => t.uid));
+      if (!hasOwn(targets, collection)) targets[collection] = new Set(assignableTargets(fullData, caller, collection, credentials).map((t) => t.uid));
       return targets[collection];
     },
   };
@@ -611,7 +618,7 @@ export function buildAuthorizedView(fullData, caller, opts = {}) {
   // Descriptor extras (inside dataScope, which the client strips from the data it keeps): the server-authorized "Assigned To"
   // pickers for the two record types and, for the Developer ONLY, the scope policy and the access audit trails.
   final.dataScope = { ...final.dataScope, assignTargets: {} };
-  for (const coll of SCOPED_COLLECTIONS) final.dataScope.assignTargets[coll] = assignableTargets(fullData, caller, coll);
+  for (const coll of SCOPED_COLLECTIONS) final.dataScope.assignTargets[coll] = assignableTargets(fullData, caller, coll, opts && opts.credentials);
   if (caller.role === ROLE_DEVELOPER) {
     final.dataScope.control = {
       scopePolicy: scopePolicyForDeveloper(fullData.scopePolicy),
@@ -648,14 +655,15 @@ export function emptyPerUserBucket() {
  * @param {object} serverData    current authoritative appData.json contents
  * @param {object} submitted     the caller's submitted full DB JSON
  * @param {object} caller        { uid, role, linkedId }
+ * @param {object} credentials   authoritative credentials document, used to validate new-record owners
  * @returns {object} the new authoritative appData.json contents to persist
  */
-export function mergeAuthorizedSave(serverData, submitted, caller) {
+export function mergeAuthorizedSave(serverData, submitted, caller, credentials) {
   const sectionGated = applySectionWriteGate(mergeAuthorizedSaveScoped(serverData, submitted, caller), serverData, caller);
   const scopeGated = applyOwnerScopeWriteGate(sectionGated, serverData, caller);
   // Record-level ACL (runs for EVERY role, superadmin included): enforces EDIT / DELETE per record and makes `acl` and
   // `ownerId` server-owned -- they are always taken from serverData, never from the submitted blob.
-  return applyRecordAclToSave(scopeGated, serverData, buildRecordAccessContext(serverData, caller), submitted);
+  return applyRecordAclToSave(scopeGated, serverData, buildRecordAccessContext(serverData, caller, credentials), submitted);
 }
 
 function mergeAuthorizedSaveScoped(serverData, submitted, caller) {

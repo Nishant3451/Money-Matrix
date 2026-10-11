@@ -9,9 +9,9 @@
 //   * the caller must be able to VIEW the record and EDIT it (section "write" + Data Scope write ceiling + record ACL), and
 //     must be its owner, a full-access role (admin and above) acting inside their ceiling, or a record-super;
 //     a user who merely holds an explicit EDIT grant may edit the content but cannot hand the record to somebody else;
-//   * to WHOM:  Developer / record-super -> any ACTIVE user;  everyone else -> only themselves or users in their own
-//     mine+downline hierarchy (never upline, never unrelated people). The target must be active (not disabled) and hold at
-//     least "view" on the section, otherwise the record would be invisible to them;
+//   * to WHOM:  Developer / record-super -> any ACTIVE login account; everyone else -> only themselves or users in their
+//     own mine+downline hierarchy (never upline, never unrelated people). Target role is not restricted, but the account
+//     must be active, have a valid credentials-document PIN hash, and hold at least "view" on the section;
 //   * stale protection: `expectedOwner` must equal the record's current owner, otherwise 409 and nothing changes.
 //
 // Moving a record never makes it more widely available: the access list (record ACL) stays as it was (a restricted list stays
@@ -29,11 +29,11 @@ const isPlainObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const fail = (status, code, message, extra) => ({ error: { status, code, message, ...(extra || {}) } });
 
 /**
- * @param {object} p { appData, ctx, caller:{uid,role,linkedId}, collection, bucket, id, expectedOwner, targetUid }
+ * @param {object} p { appData, ctx, caller:{uid,role,linkedId}, credentials, collection, bucket, id, expectedOwner, targetUid }
  *   `ctx` is buildRecordAccessContext(appData, caller). `bucket` is null for appData.shared records, else the per-user bucket id.
  * @returns {{error:{status,code,message}}|{appData, result:{owner,changed}}}
  */
-export function computeAssignment({ appData, ctx, caller, collection, bucket, id, expectedOwner, targetUid }) {
+export function computeAssignment({ appData, ctx, caller, credentials, collection, bucket, id, expectedOwner, targetUid }) {
   // ---- 1. request shape (400) ----
   const badId = (v) => typeof v !== "string" || !v || v.length > MAX_UID_LENGTH;
   if (!ACL_COLLECTIONS.includes(collection) || badId(id) || badId(targetUid)) return fail(400, "ASSIGN_INVALID", "The assignment request is not valid");
@@ -56,12 +56,12 @@ export function computeAssignment({ appData, ctx, caller, collection, bucket, id
   const mayTransfer = perms.edit && (ctx.isSuper || ctx.isFull || owner === ctx.uid);
   if (!mayTransfer) return fail(403, "ASSIGN_FORBIDDEN", "You are not allowed to assign this record");
 
-  // ---- 5. no-op ----
-  if (targetUid === owner) return { appData, result: { owner, changed: false } };
-
-  // ---- 6. is the target someone this caller may assign to? (nonexistent / inactive / out of hierarchy / cannot see the section: one generic answer) ----
-  const eligible = assignableTargets(appData, caller, collection);
+  // ---- 5. is the target an active login account this caller may assign to? (one generic answer) ----
+  const eligible = assignableTargets(appData, caller, collection, credentials);
   if (!eligible.some((t) => t.uid === targetUid)) return fail(400, "ASSIGN_TARGET_INVALID", "That user cannot be assigned this record");
+
+  // ---- 6. no-op ----
+  if (targetUid === owner) return { appData, result: { owner, changed: false } };
 
   // ---- 7. apply (copy-on-write) ----
   const acl = parseAcl(rec);

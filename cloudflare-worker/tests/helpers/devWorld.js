@@ -30,9 +30,9 @@ export const DEV_PERMS = { user: { marathon: "write", quotations: "write" } };
 export const devDoc = (o = {}) => makeDoc({ users: DEV_USERS, sups: DEV_SUPS, permissions: DEV_PERMS, ...o });
 
 /** makeWorld + fake credentials doc + fake Identity Toolkit. world.creds / world.identity are inspectable. */
-export function makeDevWorld(initial, { credentials = {}, env = {} } = {}) {
+export function makeDevWorld(initial, { credentials, env = {} } = {}) {
   const world = makeWorld(initial);
-  world.creds = clone(credentials);
+  world.creds = clone(credentials ?? {});
   world.identity = []; // { path, body }
   Object.assign(world.env, env);
   const baseInstall = world.install;

@@ -7,11 +7,15 @@
 // ============================================================================================
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rec, g, acl, find, call, getView, save, makeDevWorld, devDoc, DEV_USERS, DEV_SUPS } from "./helpers/devWorld.js";
+import { rec, g, acl, find, call, getView, save, makeDevWorld, devDoc, DEV_USERS, DEV_SUPS, DEV_PERMS, credFor } from "./helpers/devWorld.js";
 import { assignableTargets, buildRecordAccessContext } from "../lib/authorization.js";
 import { computeAssignment } from "../lib/recordAssign.js";
 
-const world = (o = {}) => makeDevWorld(devDoc({
+const withLoginCredentials = (doc, options = {}) => makeDevWorld(doc, {
+  credentials: Object.fromEntries((doc.users || []).map((u) => [u.id, credFor("fixture-pin", u.role)])),
+  ...options,
+});
+const world = (o = {}) => withLoginCredentials(devDoc({
   tx: [rec("t_low", "low"), rec("t_mid", "mid"), rec("t_top", "top"), rec("t_peer", "peer"), rec("t_other", "other")],
   q: [rec("q_low", "low"), rec("q_mid", "mid"), rec("q_top", "top")],
   ...o,
@@ -45,6 +49,22 @@ test("DEVELOPER assigns a Payment and a Quotation to any eligible active user; t
   // the new owner sees it (as My Data), the old owner no longer does
   assert.ok(find((await getView(w, "other", "mine")).shared.transactions, "t_low"));
   assert.equal(find((await getView(w, "low", "mine")).shared.transactions, "t_low"), undefined);
+});
+
+test("ASSIGNMENT TARGET ROLES: active login accounts with User, Supervisor, Admin, Superadmin, and Developer roles are eligible", async () => {
+  const users = [...DEV_USERS, { id: "sup_role", username: "supervisor", role: "supervisor", linkedId: "n_peer" }];
+  const permissions = { ...DEV_PERMS, supervisor: { marathon: "view", quotations: "view" } };
+  const w = withLoginCredentials(devDoc({ users, permissions, tx: [rec("t_role", "low")] }));
+  const expected = [["low", "user"], ["sup_role", "supervisor"], ["top", "admin"], ["root", "superadmin"], ["dev", "developer"]];
+  let currentOwner = "low";
+  for (const [targetUid] of expected) {
+    const result = await assign(w, "dev", { id: "t_role", expectedOwner: currentOwner, targetUid });
+    assert.equal(result.status, 200, `${targetUid}: ${JSON.stringify(result.json)}`);
+    currentOwner = targetUid;
+    assert.equal(owner(w, "t_role"), targetUid);
+  }
+  const targets = (await getView(w, "dev")).dataScope.assignTargets.transactions;
+  for (const [uid] of expected) assert.ok(targets.some((target) => target.uid === uid), `${uid} appears in the authorized picker`);
 });
 
 test("SUPERADMIN assigns across users under its authority; once the Developer removes its All Data it can only assign inside its hierarchy", async () => {
@@ -97,7 +117,7 @@ test("ORDINARY USER: cannot give a record away or take anyone else's (shared sto
   assert.equal(owner(w, "t_mid"), "mid");
   // Per-user storage: the user owns their bucket, so keeping a record is a no-op and giving it to anyone outside their hierarchy is refused.
   const bucket = (txs) => ({ transactions: txs, quotations: [], members: [], gifts: [], coaches: [], supervisors: [], custom: {}, products: [], clients: [] });
-  const w2 = makeDevWorld(devDoc({ perUser: { low: bucket([rec("p1", "low")]), peer: bucket([]) } }));
+  const w2 = withLoginCredentials(devDoc({ perUser: { low: bucket([rec("p1", "low")]), peer: bucket([]) } }));
   const own = await call(w2, "low", "/record/assign", { collection: "transactions", bucket: "low", id: "p1", expectedOwner: "low", targetUid: "low" });
   assert.deepEqual(own.json.data, { owner: "low", changed: false });
   for (const target of ["peer", "mid", "top", "other", "root"]) assert.equal((await call(w2, "low", "/record/assign", { collection: "transactions", bucket: "low", id: "p1", expectedOwner: "low", targetUid: target })).status, 400, target);
@@ -107,7 +127,7 @@ test("ORDINARY USER: cannot give a record away or take anyone else's (shared sto
 test("a mere EDIT grant lets someone change the content of a record but never hand it to somebody else", async () => {
   const users = [...DEV_USERS, { id: "boss", username: "boss", role: "user", linkedId: "n_boss" }, { id: "mgr", username: "mgr", role: "user", linkedId: "n_mgr" }, { id: "emp", username: "emp", role: "user", linkedId: "n_emp" }];
   const sups = [...DEV_SUPS, { id: "n_boss", supervisorId: null }, { id: "n_mgr", supervisorId: "n_boss" }, { id: "n_emp", supervisorId: "n_mgr" }];
-  const w = makeDevWorld(devDoc({ users, sups, tx: [rec("t_emp", "emp", { acl: acl(1, [g("mgr", "edit")]) })] }));
+  const w = withLoginCredentials(devDoc({ users, sups, tx: [rec("t_emp", "emp", { acl: acl(1, [g("mgr", "edit")]) })] }));
   const edited = await save(w, "mgr", (v) => { find(v.shared.transactions, "t_emp").amount = 5; });
   assert.equal(edited.status, 200);
   assert.equal(find(w.state.doc.shared.transactions, "t_emp").amount, 5, "the grant works for content");
@@ -145,7 +165,7 @@ test("EDITING unrelated fields preserves ownership (own record, downline record,
 
 test("EDITING in per-user storage keeps the record in its owner's bucket (ownerId untouched)", async () => {
   const bucket = (txs) => ({ transactions: txs, quotations: [], members: [], gifts: [], coaches: [], supervisors: [], custom: {}, products: [], clients: [] });
-  const w = makeDevWorld(devDoc({ perUser: { low: bucket([rec("p1", "low")]), peer: bucket([]) } }));
+  const w = withLoginCredentials(devDoc({ perUser: { low: bucket([rec("p1", "low")]), peer: bucket([]) } }));
   assert.equal((await save(w, "low", (v) => { const r = find(v.perUser.low.transactions, "p1"); r.amount = 21; r.ownerId = "peer"; })).status, 200);
   assert.equal(find(w.state.doc.perUser.low.transactions, "p1").amount, 21);
   assert.equal(find(w.state.doc.perUser.low.transactions, "p1").ownerId, "low");
@@ -228,6 +248,42 @@ test("INVALID targets: nonexistent, disabled, a user who cannot see the section,
   assert.equal((await assign(w, "off", { id: "t_low", expectedOwner: "low", targetUid: "off" })).status, 403, "a disabled caller is refused outright");
 });
 
+test("ASSIGNMENT TARGET CREDENTIALS: nonexistent, disabled, missing-credential, and malformed-credential accounts are rejected", async () => {
+  const users = [
+    ...DEV_USERS,
+    { id: "disabled", username: "disabled", role: "user", linkedId: null, disabled: true },
+    { id: "no_credential", username: "no_credential", role: "user", linkedId: null },
+    { id: "bad_credential", username: "bad_credential", role: "user", linkedId: null },
+  ];
+  const w = withLoginCredentials(devDoc({ users, tx: [rec("t_low", "low"), rec("t_no_credential", "no_credential")] }));
+  delete w.creds.no_credential;
+  w.creds.bad_credential = { pinHash: "not-a-valid-login-hash", role: "user" };
+  const v = await getView(w, "dev");
+  const targets = uids(v.dataScope.assignTargets.transactions);
+  assert.ok(!targets.includes("disabled"));
+  assert.ok(!targets.includes("no_credential"));
+  assert.ok(!targets.includes("bad_credential"));
+  for (const targetUid of ["ghost", "disabled", "no_credential", "bad_credential"]) {
+    const refused = await assign(w, "dev", { id: "t_low", expectedOwner: "low", targetUid });
+    assert.equal(refused.status, 400, targetUid);
+    assert.equal(refused.json.error.code, "ASSIGN_TARGET_INVALID");
+  }
+  const invalidOwnerNoOp = await assign(w, "dev", { id: "t_no_credential", expectedOwner: "no_credential", targetUid: "no_credential" });
+  assert.equal(invalidOwnerNoOp.status, 400, "even a no-op validates the authoritative target credential");
+  assert.equal(owner(w, "t_no_credential"), "no_credential");
+  assert.equal(owner(w, "t_low"), "low");
+});
+
+test("ASSIGNMENT AUTHORITY: a user cannot assign even to an otherwise eligible account or forge ownership/role", async () => {
+  const w = world();
+  const refused = await assign(w, "low", {
+    id: "t_low", expectedOwner: "low", targetUid: "top", role: "developer", ownerId: "top", isSuper: true,
+  });
+  assert.equal(refused.status, 403);
+  assert.equal(refused.json.error.code, "ASSIGN_FORBIDDEN");
+  assert.equal(owner(w, "t_low"), "low");
+});
+
 test("section permission: without WRITE on Payments a user can assign nothing, and the picker is empty", async () => {
   const w = world({ extra: { userPermissions: { low: { marathon: "view" } } } });
   assert.deepEqual(targetsFor(w, "low"), []);
@@ -273,7 +329,7 @@ test("STALE blobs / backups / restores cannot rewrite ownership or restore a rev
 
 test("STALE per-user-storage blobs cannot copy a record into its old owner's bucket (ownership moves only via /record/assign)", async () => {
   const bucket = (txs) => ({ transactions: txs, quotations: [], members: [], gifts: [], coaches: [], supervisors: [], custom: {}, products: [], clients: [] });
-  const w = makeDevWorld(devDoc({ perUser: { low: bucket([rec("p1", "low")]), other: bucket([]), dev: bucket([]) } }));
+  const w = withLoginCredentials(devDoc({ perUser: { low: bucket([rec("p1", "low")]), other: bucket([]), dev: bucket([]) } }));
   const backup = await getView(w, "dev", "all");
   const moved = await call(w, "dev", "/record/assign", { collection: "transactions", bucket: "low", id: "p1", expectedOwner: "low", targetUid: "other" });
   assert.equal(moved.status, 200, JSON.stringify(moved.json));
@@ -283,7 +339,7 @@ test("STALE per-user-storage blobs cannot copy a record into its old owner's buc
   assert.equal(find(w.state.doc.perUser.low.transactions, "p1"), undefined, "the stale backup cannot put it back with the old owner");
   assert.equal(Object.values(w.state.doc.perUser).flatMap((b) => b.transactions).filter((r) => r.id === "p1").length <= 1, true, "never duplicated");
   // recipient already holds that id: refused
-  const w2 = makeDevWorld(devDoc({ perUser: { low: bucket([rec("p1", "low")]), other: bucket([rec("p1", "other")]) } }));
+  const w2 = withLoginCredentials(devDoc({ perUser: { low: bucket([rec("p1", "low")]), other: bucket([rec("p1", "other")]) } }));
   const clash = await call(w2, "dev", "/record/assign", { collection: "transactions", bucket: "low", id: "p1", expectedOwner: "low", targetUid: "other" });
   assert.equal(clash.status, 409);
 });
@@ -307,7 +363,7 @@ test("assignment NEVER makes a record more widely available: restricted stays re
 test("VIEW, EDIT and DELETE grants remain distinct", async () => {
   const users = [...DEV_USERS, { id: "boss", username: "boss", role: "user", linkedId: "n_boss" }, { id: "mgr", username: "mgr", role: "user", linkedId: "n_mgr" }, { id: "emp", username: "emp", role: "user", linkedId: "n_emp" }];
   const sups = [...DEV_SUPS, { id: "n_boss", supervisorId: null }, { id: "n_mgr", supervisorId: "n_boss" }, { id: "n_emp", supervisorId: "n_mgr" }];
-  const mk = (grant) => makeDevWorld(devDoc({ users, sups, tx: [rec("t_emp", "emp", { acl: acl(1, [grant]) })] }));
+  const mk = (grant) => withLoginCredentials(devDoc({ users, sups, tx: [rec("t_emp", "emp", { acl: acl(1, [grant]) })] }));
   const del = (w) => call(w, "mgr", "/data/save", { json: JSON.stringify({ shared: { transactions: [] }, perUser: {}, recordDeletes: [{ coll: "transactions", bucket: null, id: "t_emp" }] }) });
   // VIEW only: sees it, can neither edit nor delete
   let w = mk(g("mgr"));
@@ -355,7 +411,7 @@ test("LEGACY records without an owner: hidden from scoped users, Developer/super
 // ============================================================================================
 test("PER-USER storage: assignment moves the record to the new owner's bucket (the bucket IS the owner) and is audited", async () => {
   const bucket = (txs, qs = []) => ({ transactions: txs, quotations: qs, members: [], gifts: [], coaches: [], supervisors: [], custom: {}, products: [], clients: [] });
-  const w = makeDevWorld(devDoc({ perUser: { low: bucket([rec("p1", "low")], [rec("pq1", "low")]), peer: bucket([]) } }));
+  const w = withLoginCredentials(devDoc({ perUser: { low: bucket([rec("p1", "low")], [rec("pq1", "low")]), peer: bucket([]) } }));
   assert.equal((await call(w, "top", "/record/assign", { collection: "transactions", bucket: "low", id: "p1", expectedOwner: "low", targetUid: "peer" })).status, 200);
   assert.ok(find(w.state.doc.perUser.peer.transactions, "p1"));
   assert.equal(find(w.state.doc.perUser.low.transactions, "p1"), undefined);

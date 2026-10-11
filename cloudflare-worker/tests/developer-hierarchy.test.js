@@ -14,7 +14,11 @@ import { authorizeSetUserPin } from "../lib/userPin.js";
 
 const ALL_TX = [rec("t_dev", "dev"), rec("t_root", "root"), rec("t_top", "top"), rec("t_mid", "mid"), rec("t_low", "low"), rec("t_peer", "peer"), rec("t_other", "other")];
 const ALL_Q = ALL_TX.map((r) => rec(r.id.replace("t_", "q_"), r.ownerId));
-const world = (o = {}, w = {}) => makeDevWorld(devDoc({ tx: ALL_TX, q: ALL_Q, ...o }), w);
+const world = (o = {}, w = {}) => {
+  const doc = devDoc({ tx: ALL_TX, q: ALL_Q, ...o });
+  const credentials = Object.fromEntries(doc.users.map((u) => [u.id, credFor("fixture-pin", u.role)]));
+  return makeDevWorld(doc, { credentials, ...w });
+};
 const userRow = (w, id) => w.state.doc.users.find((u) => u.id === id);
 const ids = (arr) => (arr || []).map((r) => r.id).sort();
 
@@ -316,7 +320,7 @@ test("BOOTSTRAP: wrong token, weak PIN and bad payloads create nothing", async (
   const w = bootWorld();
   assert.equal((await callPublic(w, "/developer/bootstrap", { token: "wrong", username: "me", newPin: "Str0ngPin!" })).status, 403);
   assert.equal((await callPublic(w, "/developer/bootstrap", { username: "me", newPin: "Str0ngPin!" })).status, 403);
-  assert.equal((await callPublic(w, "/developer/bootstrap", { token: SECRET, username: "me", newPin: "1234" })).status, 400, "too short");
+  assert.equal((await callPublic(w, "/developer/bootstrap", { token: SECRET, username: "me", newPin: "123" })).status, 400, "too short");
   assert.equal((await callPublic(w, "/developer/bootstrap", { token: SECRET, username: "me", newPin: "11111111" })).status, 400, "trivial repeat");
   assert.equal((await callPublic(w, "/developer/bootstrap", { token: SECRET, username: "me", newPin: "x".repeat(40) })).status, 400, "too long");
   assert.equal((await callPublic(w, "/developer/bootstrap", { token: SECRET, newPin: "Str0ngPin!" })).status, 400, "username required");
@@ -328,23 +332,23 @@ test("BOOTSTRAP: wrong token, weak PIN and bad payloads create nothing", async (
 
 test("BOOTSTRAP: creates the Developer once, stores only a bcrypt hash, returns no secret, then refuses forever", async () => {
   const w = bootWorld();
-  const r = await callPublic(w, "/developer/bootstrap", { token: SECRET, username: "owner", newPin: "My-Own-Pin-77" });
+  const r = await callPublic(w, "/developer/bootstrap", { token: SECRET, username: "owner", newPin: "A!2b" });
   assert.equal(r.status, 200, JSON.stringify(r.json));
   const body = JSON.stringify(r.json);
-  assert.ok(!body.includes("My-Own-Pin-77") && !body.includes(SECRET) && !body.includes("$2"), "no PIN, secret or hash in the response");
+  assert.ok(!body.includes("A!2b") && !body.includes(SECRET) && !body.includes("$2"), "no PIN, secret or hash in the response");
   const dev = w.state.doc.users.find((u) => u.role === "developer");
   assert.equal(dev.username, "owner");
   assert.equal(dev.linkedId, null);
   assert.equal(r.json.data.userId, dev.id);
   assert.equal(w.creds[dev.id].role, "developer");
-  assert.ok(await bcrypt.compare("My-Own-Pin-77", w.creds[dev.id].pinHash));
-  assert.ok(!JSON.stringify(w.state.doc).includes("My-Own-Pin-77"), "plaintext PIN never reaches appData");
+  assert.ok(await bcrypt.compare("A!2b", w.creds[dev.id].pinHash));
+  assert.ok(!JSON.stringify(w.state.doc).includes("A!2b"), "plaintext PIN never reaches appData");
   assert.ok(w.identity.some((c) => c.body && String(c.body.customAttributes || "").includes("developer")), "claims set");
   // second attempt, even with the right secret
   assert.equal((await callPublic(w, "/developer/bootstrap", { token: SECRET, username: "owner2", newPin: "Another-Pin-88" })).status, 409);
   assert.equal(w.state.doc.users.filter((u) => u.role === "developer").length, 1);
   // the new Developer signs in with their own PIN and gets the Developer role; the old default does not exist
-  const login = await callPublic(w, "/login", { username: "owner", pin: "My-Own-Pin-77" });
+  const login = await callPublic(w, "/login", { username: "owner", pin: "A!2b" });
   assert.equal(login.status, 200);
   assert.equal(login.json.user.role, "developer");
   assert.equal((await callPublic(w, "/login", { username: "owner", pin: "1234" })).status, 401);

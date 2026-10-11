@@ -72,6 +72,7 @@ import {
   isKnownConsentCategory,
 } from "./lib/privacy.js";
 
+const MIN_PIN_LENGTH = 4;
 const MAX_PIN_LENGTH = 16;
 const BCRYPT_ROUNDS = 10;
 
@@ -418,6 +419,7 @@ async function handleDataGet(request, env, cors) {
     // (they go through runPrivacyMutation, a separate code path this does not touch), so the user
     // can always still read policies and call /privacy/policy/accept to satisfy this.
     if (!hasAcceptedAllCurrentPolicies(fullData, auth.uid)) return policyAcceptanceRequiredError(cors, fullData, auth.uid);
+    const credentials = await readCredentials(env, accessToken);
     // Role = the token's claim, DEMOTED to the stored record's role if that has less privilege (see effectiveRole).
     // `scope` is the ONLY field read from this request body, and it is only a REQUEST: buildAuthorizedView validates it
     // against the maximum scope the server computes from the verified identity + stored hierarchy, and anything not
@@ -428,7 +430,7 @@ async function handleDataGet(request, env, cors) {
       : undefined;
     let view;
     try {
-      view = buildAuthorizedView(fullData, { uid: auth.uid, role: effectiveRole(auth.role, me), linkedId: me.linkedId || null }, { scope: requestedScope });
+      view = buildAuthorizedView(fullData, { uid: auth.uid, role: effectiveRole(auth.role, me), linkedId: me.linkedId || null }, { scope: requestedScope, credentials });
     } catch (scopeErr) {
       if (scopeErr && scopeErr.code === "SCOPE_NOT_ALLOWED") {
         return jsonResponse({ error: { message: "That data scope is not available for your account.", code: "SCOPE_NOT_ALLOWED" } }, 403, cors);
@@ -559,6 +561,7 @@ async function handleDataSave(request, env, cors) {
       // never be trusted. A user who hasn't accepted cannot save real application data even if
       // they craft the request by hand.
       if (!hasAcceptedAllCurrentPolicies(serverData, auth.uid)) return policyAcceptanceRequiredError(cors, serverData, auth.uid);
+      const credentials = await readCredentials(env, accessToken);
 
       // Re-derived on EVERY attempt from this attempt's fresh read, so a demotion that lands between retries
       // is honoured and the role can never be older than the snapshot the merge runs against.
@@ -566,7 +569,7 @@ async function handleDataSave(request, env, cors) {
         uid: auth.uid,
         role: effectiveRole(auth.role, me),
         linkedId: me.linkedId || null,
-      });
+      }, credentials);
       const write = await writeAppDataIfUnchanged(env, accessToken, merged, updateTime);
       if (write.conflict) continue; // someone else wrote in between -- re-read and reapply
 
@@ -650,8 +653,8 @@ async function handleSetUserPin(request, env, cors) {
   const payload = read.value;
   const targetUserId = String(payload?.targetUserId || "").trim();
   if (!targetUserId) return authError("targetUserId is required", 400, cors);
-  if (payload?.newPin && String(payload.newPin).length > MAX_PIN_LENGTH) {
-    return authError("PIN too long", 400, cors);
+  if (payload?.newPin && (String(payload.newPin).length < MIN_PIN_LENGTH || String(payload.newPin).length > MAX_PIN_LENGTH)) {
+    return authError("PIN must be 4-16 characters", 400, cors);
   }
 
   try {
@@ -1198,7 +1201,8 @@ async function handlePrivacyExport(request, env, cors) {
 // lives in, so reassignment is a dedicated, validated operation (lib/recordAssign.js). Body: { collection, id,
 // bucket?: <uid> (omit for shared-storage records), expectedOwner: <uid the caller last saw, or null for a legacy unowned
 // record>, targetUid }. Who may assign what, and to whom, is decided from the server's freshly-read appData and the
-// verified caller only; a stale expectedOwner is refused (409) so an old screen cannot overwrite newer ownership.
+//   verified caller plus the server's credentials document; targets must be active login accounts and stale expectedOwner
+//   is refused (409) so an old screen cannot overwrite newer ownership.
 // -------------------------------------------------------------------------------------------
 const MAX_RECORD_ASSIGN_BODY_BYTES = 8 * 1024;
 const MAX_RECORD_ASSIGN_WRITES_PER_WINDOW = 60;
@@ -1225,15 +1229,18 @@ async function handleRecordAssign(request, env, cors) {
   try {
     const accessToken = await getGoogleAccessToken(env);
     for (let attempt = 0; attempt < MAX_DATA_SAVE_ATTEMPTS; attempt++) {
-      const { data: appData, updateTime } = await readAppDataWithVersion(env, accessToken);
+      const [{ data: appData, updateTime }, credentials] = await Promise.all([
+        readAppDataWithVersion(env, accessToken),
+        readCredentials(env, accessToken),
+      ]);
       const me = (appData.users || []).find((u) => u.id === auth.uid);
       if (!me) return authError("Account not found", 403, cors);
       if (me.disabled === true) return authError("Account disabled", 403, cors);
       if (!hasAcceptedAllCurrentPolicies(appData, auth.uid)) return policyAcceptanceRequiredError(cors, appData, auth.uid);
 
       const caller = { uid: auth.uid, role: effectiveRole(auth.role, me), linkedId: me.linkedId || null };
-      const ctx = buildRecordAccessContext(appData, caller);
-      const outcome = computeAssignment({ appData, ctx, caller, collection: body.collection, bucket, id: body.id, expectedOwner: body.expectedOwner, targetUid: body.targetUid });
+      const ctx = buildRecordAccessContext(appData, caller, credentials);
+      const outcome = computeAssignment({ appData, ctx, caller, credentials, collection: body.collection, bucket, id: body.id, expectedOwner: body.expectedOwner, targetUid: body.targetUid });
       if (outcome.error) {
         const { status, code, message, ...extra } = outcome.error;
         return jsonResponse({ error: { message, code, ...extra } }, status, cors);
@@ -1383,7 +1390,7 @@ async function handleUserDisable(request, env, cors) {
 //
 // There is no built-in Developer PIN. Setup needs a secret that only the person who deploys the Worker holds:
 //     npx wrangler secret put DEVELOPER_BOOTSTRAP_TOKEN        (a long random string; never committed, never returned)
-// plus a PIN the Developer chooses now (8-16 characters) -- stored only as a bcrypt hash in moneymatrix/credentials, exactly
+// plus a PIN the Developer chooses now (4-16 characters) -- stored only as a bcrypt hash in moneymatrix/credentials, exactly
 // like every other account. Body: { token, newPin, username }                      -> creates a NEW Developer account, or
 //       { token, newPin, userId, currentPin }                                      -> promotes an EXISTING account (its current PIN is verified too).
 // It works only while no complete Developer exists (a row with role "developer" AND a credentials entry). Once it has
@@ -1392,7 +1399,6 @@ async function handleUserDisable(request, env, cors) {
 // after deleting the Developer's credentials entry in the Firebase console (documented in cloudflare-worker/README.md).
 // -------------------------------------------------------------------------------------------
 const MAX_BOOTSTRAP_BODY_BYTES = 2 * 1024;
-const MIN_DEVELOPER_PIN_LENGTH = 8;
 const MAX_BOOTSTRAP_ATTEMPTS_PER_WINDOW = 5;
 const BOOTSTRAP_WINDOW_MS = 15 * 60 * 1000;
 const MIN_BOOTSTRAP_SECRET_LENGTH = 24;
@@ -1407,7 +1413,7 @@ async function constantTimeEqualStrings(a, b) {
 }
 
 function acceptableDeveloperPin(pin) {
-  if (typeof pin !== "string" || pin.length < MIN_DEVELOPER_PIN_LENGTH || pin.length > MAX_PIN_LENGTH) return false;
+  if (typeof pin !== "string" || pin.length < MIN_PIN_LENGTH || pin.length > MAX_PIN_LENGTH) return false;
   if (new Set(pin).size < 4) return false; // "11111111", "12121212" ...
   return true;
 }
@@ -1428,8 +1434,11 @@ async function handleDeveloperBootstrap(request, env, cors) {
 
   const tokenOk = typeof body.token === "string" && body.token.length <= 512 && (await constantTimeEqualStrings(body.token, secret));
   if (!tokenOk) return authError("Setup not permitted", 403, cors);
+  if (typeof body.newPin !== "string" || body.newPin.length < MIN_PIN_LENGTH || body.newPin.length > MAX_PIN_LENGTH) {
+    return authError("PIN must be 4-16 characters", 400, cors);
+  }
   if (!acceptableDeveloperPin(body.newPin)) {
-    return authError(`Choose a Developer PIN of ${MIN_DEVELOPER_PIN_LENGTH}-${MAX_PIN_LENGTH} characters that is not a trivial repeat`, 400, cors);
+    return authError("Choose a Developer PIN that is not a trivial repeat", 400, cors);
   }
 
   try {

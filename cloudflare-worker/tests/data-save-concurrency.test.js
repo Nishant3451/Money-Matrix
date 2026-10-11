@@ -12,10 +12,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
+import bcrypt from "bcryptjs";
 import { encodeFirestoreFields } from "../lib/googleFirestore.js";
 import worker from "../login-worker.js";
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
+const TEST_PIN_HASH = bcrypt.hashSync("fixture-pin", 4);
 
 function makeVersionedFirestoreFetch() {
   const state = { doc: {}, version: "v0" };
@@ -45,6 +47,13 @@ function makeVersionedFirestoreFetch() {
         state.version = `v${versionCounter}`;
         return new Response(JSON.stringify({ updateTime: state.version }), { status: 200 });
       }
+    }
+    if (u.includes("moneymatrix/credentials") && method === "GET") {
+      const credentials = {
+        alice: { pinHash: TEST_PIN_HASH, role: "user" },
+        bob: { pinHash: TEST_PIN_HASH, role: "user" },
+      };
+      return new Response(JSON.stringify({ fields: encodeFirestoreFields(credentials), updateTime: "c0" }), { status: 200 });
     }
     if (u.includes("moneymatrix/meta")) return new Response(JSON.stringify({}), { status: 200 });
     throw new Error(`Unmocked fetch: ${method} ${u}`);

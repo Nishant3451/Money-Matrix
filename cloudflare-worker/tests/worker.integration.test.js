@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import bcrypt from "bcryptjs";
 import { generateKeyPairSync, webcrypto } from "node:crypto";
 import worker from "../login-worker.js";
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const PROJECT_ID = "money-metrix-9f1da";
+const TEST_PIN_HASH = bcrypt.hashSync("fixture-pin", 4);
 let kidCounter = 0;
 function nextKid() {
   kidCounter += 1;
@@ -228,7 +230,6 @@ function req(path, { method = "POST", body, headers = {} } = {}) {
 
 // A known-good bcrypt hash for PIN "1234" at the app's configured rounds, precomputed once so
 // tests don't waste time re-hashing (bcrypt is deliberately slow).
-import bcrypt from "bcryptjs";
 let HASH_1234;
 test.before(async () => {
   HASH_1234 = await bcrypt.hash("1234", 10);
@@ -340,6 +341,7 @@ test("data/get: authorized user gets their downline-scoped view, not the full da
       { id: "sup_b", username: "sup_b", role: "user", linkedId: "supB" },
     ],
   });
+  env.__state.credentials = Object.fromEntries(env.__state.appData.users.map((u) => [u.id, { pinHash: TEST_PIN_HASH, role: u.role }]));
   env.__state.appData.shared = {
     supervisors: [{ id: "supA" }, { id: "supB" }],
     members: [{ id: "m1", supervisorId: "supA" }, { id: "m2", supervisorId: "supB" }],
@@ -452,14 +454,25 @@ test("setPin: self-service PIN change succeeds with correct currentPin, stores o
   installFakeFetch(env, publicJwk);
   const token = await signIdToken(privateKey, "alice", {}, kid);
 
+  for (const invalidPin of ["abc", "a".repeat(17)]) {
+    const invalid = await worker.fetch(
+      req("/user/setPin", { headers: { Authorization: `Bearer ${token}` }, body: { targetUserId: "alice", currentPin: "1234", newPin: invalidPin } }),
+      env,
+      {}
+    );
+    assert.equal(invalid.status, 400);
+    assert.equal((await invalid.json()).error.message, "PIN must be 4-16 characters");
+  }
+
   const resp = await worker.fetch(
-    req("/user/setPin", { headers: { Authorization: `Bearer ${token}` }, body: { targetUserId: "alice", currentPin: "1234", newPin: "5678" } }),
+    req("/user/setPin", { headers: { Authorization: `Bearer ${token}` }, body: { targetUserId: "alice", currentPin: "1234", newPin: "A!2b" } }),
     env,
     {}
   );
   assert.equal(resp.status, 200);
-  assert.notEqual(env.__state.credentials.alice.pinHash, "5678", "plaintext PIN must never be stored");
+  assert.notEqual(env.__state.credentials.alice.pinHash, "A!2b", "plaintext PIN must never be stored");
   assert.ok(env.__state.credentials.alice.pinHash.startsWith("$2"), "must be a bcrypt hash");
+  assert.ok(await bcrypt.compare("A!2b", env.__state.credentials.alice.pinHash), "a 4-character alphanumeric/symbol PIN is accepted");
   const revokeCalls = env.__state.identityCalls.filter((c) => c.path === "accounts:update" && c.body.validSince);
   assert.equal(revokeCalls.length, 1, "self PIN change must revoke refresh tokens exactly once");
   assert.equal(revokeCalls[0].body.localId, "alice");
@@ -952,6 +965,7 @@ async function scopeEnv() {
       { id: "low", username: "low", role: "user", linkedId: "supLow" },
       { id: "other", username: "other", role: "user", linkedId: "supOther" },
     ],
+    credentials: Object.fromEntries(["sa", "adm", "top", "low", "other"].map((id) => [id, { pinHash: TEST_PIN_HASH }])),
   });
   const pay = (o, status) => ({ id: `pay-${o}`, customer: `PAYER-${o}`, amount: 10, status, ownerId: o });
   const quo = (o) => ({ id: `q-${o}`, customerName: `QCUST-${o}`, invoiceNumber: `INV-${o}`, ownerId: o });

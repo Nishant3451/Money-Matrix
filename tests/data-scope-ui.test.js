@@ -179,6 +179,28 @@ test("Payments: scope + status sit before the existing search/type filters; tota
   assert.match(mod, /window\.setMaraStatus=v=>\{ maraStatus=paymentStatusKey\(v\);/, "invalid status values are normalised");
   assert.match(results, /tx\.__foreign/, "records from other people's buckets are view-only");
 });
+test("Payments table: Assigned To is a visible column and renders the assigned account name or Unassigned", () => {
+  const results = extractFunction(mod, "renderMarathonResults");
+  const payments = [
+    { id: "assigned", ownerId: "target", customer: "Client A", product: "Service", type: "received", amount: 10, status: "completed", date: "2026-01-01" },
+    { id: "unassigned", customer: "Client B", product: "Service", type: "received", amount: 20, status: "completed", date: "2025-01-01" },
+  ];
+  const output = { innerHTML: "" };
+  const ctx = {
+    DB: { settings: { dataSharing: true }, users: [{ id: "target", username: "maya" }], profiles: { target: { displayName: "Maya Patel" } } },
+    currentUser: { id: "admin" }, viewingAs: "admin",
+    data: () => ({ transactions: payments }), scopedRecords: () => payments, filterPaymentsByStatus: (rows) => rows,
+    paymentStatusKey: () => "all", canWrite: () => false, fmtDate: () => "date", avatarChip: () => "",
+    dispName: (name) => name, esc, money: (amount) => String(amount), t: () => "Status", sj: JSON.stringify,
+    $(id) { return id === "marathon_results" ? output : null; },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(`let serverDataScope = null, maraScope = null, maraStatus = "all", marathonFilter = "all", maraSearch = ""; ${extractFunction(mod, "ownerLabel")} ${results} renderMarathonResults();`, ctx);
+  const headers = [...output.innerHTML.matchAll(/<th>(.*?)<\/th>/g)].map((m) => m[1]);
+  assert.deepEqual(headers, ["Date", "Customer", "Product/Note", "Assigned To", "Type", "Amount", "Status"]);
+  assert.match(output.innerHTML, /data-label="Assigned To"><span class="badge bg-purple">Maya Patel<\/span>/);
+  assert.match(output.innerHTML, /data-label="Assigned To"><span class="badge bg-purple">Unassigned<\/span>/);
+});
 test("Quotations: scope control before the existing search; list comes from scopedRecords; foreign rows are view-only", () => {
   const page = extractFunction(mod, "renderQuotations"), results = extractFunction(mod, "renderQuotationsResults");
   assert.ok(page.indexOf("scopeControlHtml('quote'") < page.indexOf('id="search_quotations"'));

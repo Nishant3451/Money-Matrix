@@ -160,7 +160,7 @@ npx wrangler secret put DEVELOPER_BOOTSTRAP_TOKEN   # a long random value, at le
 npx wrangler deploy
 curl -X POST https://<your-worker>/developer/bootstrap \
   -H 'Content-Type: application/json' \
-  -d '{"token":"<the token>","username":"<chosen username>","pin":"<8-16 character PIN you choose>"}'
+  -d '{"token":"<the token>","username":"<chosen username>","pin":"<4-16 character PIN you choose>"}'
 ```
 
 The endpoint is rate-limited per IP and only works while no complete Developer exists (an account row plus a credentials entry
