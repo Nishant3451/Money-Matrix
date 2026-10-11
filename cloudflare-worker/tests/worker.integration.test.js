@@ -155,7 +155,12 @@ function installFakeFetch(env, jwk) {
         // Merge patched fields (updateMask semantics: only named fields change; a field named
         // in the mask but absent from the body is DELETED — same as production Firestore).
         const maskMatch = u.match(/updateMask\.fieldPaths=([^&]+)/g) || [];
-        const maskFields = maskMatch.map((m) => decodeURIComponent(m.split("=")[1]));
+        const maskFields = maskMatch.map((m) => {
+          const decoded = decodeURIComponent(m.split("=")[1]);
+          return decoded.startsWith("`") && decoded.endsWith("`")
+            ? decoded.slice(1, -1).replace(/\\`/g, "`").replace(/\\\\/g, "\\")
+            : decoded;
+        });
         for (const f of maskFields) {
           if (body.fields && f in body.fields) {
             env.__state.credentials[f] = decodeFirestoreValueForTest(body.fields[f]);

@@ -46,7 +46,11 @@ export function makeDevWorld(initial, { credentials = {}, env = {} } = {}) {
         if (method === "GET") return new Response(JSON.stringify({ fields: encodeFirestoreFields(world.creds), updateTime: "c0" }), { status: 200 });
         if (method === "PATCH") {
           const fields = decodeFirestoreFields(JSON.parse(init.body).fields || {});
-          const mask = new URL(u).searchParams.getAll("updateMask.fieldPaths");
+          const mask = new URL(u).searchParams.getAll("updateMask.fieldPaths").map((decoded) =>
+            decoded.startsWith("`") && decoded.endsWith("`")
+              ? decoded.slice(1, -1).replace(/\\`/g, "`").replace(/\\\\/g, "\\")
+              : decoded
+          );
           for (const k of mask) { if (Object.prototype.hasOwnProperty.call(fields, k)) world.creds[k] = fields[k]; else delete world.creds[k]; }
           return new Response("{}", { status: 200 });
         }

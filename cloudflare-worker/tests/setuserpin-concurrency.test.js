@@ -105,7 +105,12 @@ function makeGatedEnvFetch({ jwk }) {
         return new Response(JSON.stringify({ fields: encodeFirestoreFields(state.credentials) }), { status: 200 });
       }
       if (method === "PATCH") {
-        const maskFields = (u.match(/updateMask\.fieldPaths=([^&]+)/g) || []).map((m) => decodeURIComponent(m.split("=")[1]));
+        const maskFields = (u.match(/updateMask\.fieldPaths=([^&]+)/g) || []).map((m) => {
+          const decoded = decodeURIComponent(m.split("=")[1]);
+          return decoded.startsWith("`") && decoded.endsWith("`")
+            ? decoded.slice(1, -1).replace(/\\`/g, "`").replace(/\\\\/g, "\\")
+            : decoded;
+        });
         for (const f of maskFields) {
           if (body.fields && f in body.fields) state.credentials[f] = decodeFirestoreValueForTest(body.fields[f]);
           else delete state.credentials[f];

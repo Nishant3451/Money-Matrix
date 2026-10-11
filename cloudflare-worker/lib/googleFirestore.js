@@ -163,7 +163,9 @@ export async function firestoreGetDocWithMeta(env, accessToken, docPath) {
  * top-level fields already on that document (Firestore's `updateMask` semantics). */
 export async function firestorePatchDoc(env, accessToken, docPath, fields) {
   const fieldPaths = Object.keys(fields);
-  const mask = fieldPaths.map((f) => `updateMask.fieldPaths=${encodeURIComponent(f)}`).join("&");
+  const mask = fieldPaths
+  .map((f) => `updateMask.fieldPaths=${encodeURIComponent(`\`${String(f).replace(/\\/g, "\\\\").replace(/`/g, "\\`")}\``)}`)
+  .join("&");
   const url = `${firestoreDocUrl(env, docPath)}?${mask}`;
   const resp = await fetch(url, {
     method: "PATCH",
@@ -222,7 +224,9 @@ export async function readAppDataWithVersion(env, accessToken) {
  * either. */
 export async function writeAppDataIfUnchanged(env, accessToken, data, expectedUpdateTime) {
   const fieldPaths = ["json"];
-  const mask = fieldPaths.map((f) => `updateMask.fieldPaths=${encodeURIComponent(f)}`).join("&");
+  const mask = fieldPaths
+    .map((f) => `updateMask.fieldPaths=${encodeURIComponent(`\`${String(f).replace(/\\/g, "\\\\").replace(/`/g, "\\`")}\``)}`)
+    .join("&");
   const precondition = expectedUpdateTime
     ? `currentDocument.updateTime=${encodeURIComponent(expectedUpdateTime)}`
     : `currentDocument.exists=false`;
@@ -261,7 +265,9 @@ export async function bumpMeta(env, accessToken) {
  * setUserPin's delete-user path to remove one user's entry from moneymatrix/credentials without
  * touching any other user's entry. */
 export async function firestoreDeleteFields(env, accessToken, docPath, fieldPaths) {
-  const mask = fieldPaths.map((f) => `updateMask.fieldPaths=${encodeURIComponent(f)}`).join("&");
+  const mask = fieldPaths
+    .map((f) => `updateMask.fieldPaths=${encodeURIComponent(`\`${String(f).replace(/\\/g, "\\\\").replace(/`/g, "\\`")}\``)}`)
+    .join("&");
   const url = `${firestoreDocUrl(env, docPath)}?${mask}`;
   const resp = await fetch(url, {
     method: "PATCH",
