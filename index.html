@@ -577,14 +577,8 @@
   .btn-red:hover i.fa-trash, .icon-btn-danger:hover i.fa-trash{animation:mmTrashWiggle .35s var(--ease)}
   .btn-red:active i.fa-trash, .icon-btn-danger:active i.fa-trash{transform:translateY(-1px) rotate(-14deg)}
 
-  /* OTP-style PIN entry */
-  .otp-row{display:flex;gap:8px;justify-content:center;margin-bottom:4px}
-  .otp-box{width:15%;max-width:48px;aspect-ratio:1/1;text-align:center;font-size:1.15rem;font-weight:700;border:1.5px solid var(--border-strong);border-radius:var(--r-md);background:var(--surface-2);letter-spacing:0;transition:border-color .15s var(--ease),box-shadow .15s var(--ease),background .15s var(--ease),transform .12s var(--ease)}
-  .otp-box:focus{border-color:var(--primary)!important;background:var(--surface);box-shadow:0 0 0 3px rgba(20,99,86,.14)}
-  .otp-box.mm-filled{border-color:var(--primary-soft);background:var(--surface)}
-  .otp-row.mm-shake{animation:mmShake .4s var(--ease)}
-  .otp-row.mm-shake .otp-box{border-color:var(--danger)!important;background:var(--danger-tint)}
-  .otp-row.mm-success .otp-box{border-color:var(--success)!important;background:var(--success-tint);animation:mmPulseRing .5s var(--ease)}
+  .login-pin-input.mm-shake{animation:mmShake .4s var(--ease);border-color:var(--danger)!important;background:var(--danger-tint)}
+  .login-pin-input.mm-success{border-color:var(--success)!important;background:var(--success-tint);animation:mmPulseRing .5s var(--ease)}
 
   /* Row hover/selection */
   table tbody tr{transition:background .12s var(--ease)}
@@ -630,16 +624,8 @@
         <h2 class="login-welcome">Welcome back</h2>
         <div class="form-group"><label>Username</label><input id="usernameInput" type="text" placeholder="Username" /></div>
         <div class="form-group">
-          <label>PIN</label>
-          <input id="pinInput" type="password" inputmode="numeric" maxlength="6" autocomplete="off" style="position:absolute;opacity:0;height:0;width:0;pointer-events:none" tabindex="-1" aria-hidden="true" />
-          <div class="otp-row" id="otpRow" role="group" aria-label="PIN entry">
-            <input class="otp-box" type="password" inputmode="numeric" maxlength="1" data-otp-i="0" autocomplete="off">
-            <input class="otp-box" type="password" inputmode="numeric" maxlength="1" data-otp-i="1" autocomplete="off">
-            <input class="otp-box" type="password" inputmode="numeric" maxlength="1" data-otp-i="2" autocomplete="off">
-            <input class="otp-box" type="password" inputmode="numeric" maxlength="1" data-otp-i="3" autocomplete="off">
-            <input class="otp-box" type="password" inputmode="numeric" maxlength="1" data-otp-i="4" autocomplete="off">
-            <input class="otp-box" type="password" inputmode="numeric" maxlength="1" data-otp-i="5" autocomplete="off">
-          </div>
+          <label for="pinInput">PIN</label>
+          <input id="pinInput" class="login-pin-input" type="password" minlength="8" maxlength="16" autocomplete="current-password" placeholder="Enter PIN" />
         </div>
         <div style="display:flex;align-items:center;justify-content:flex-start;gap:8px;margin-bottom:20px;text-align:left">
           <input type="checkbox" id="rememberMe" style="width:16px;height:16px;accent-color:var(--primary);cursor:pointer">
@@ -1692,20 +1678,20 @@ function assigneeFieldHtml(coll, selectId, existingOwner, isEdit){
 function isDeveloper(){ return currentUser?.role==="developer"; }
 function isSuperAdmin(){ return currentUser?.role==="superadmin" || currentUser?.role==="developer"; }
 function isAdmin(){ return currentUser?.role==="admin" || currentUser?.role==="superadmin" || currentUser?.role==="developer"; }
-// May the signed-in account open the account editor for `u`?  Developer rows are only ever editable by the Developer themself;
-// Super Admin rows only by the Developer (or their owner for profile fields); everyone below by admins and above.
+// May the signed-in account open the account editor for `u`? Developer rows are protected;
+// Super Admin rows are manageable only by the Developer; lower-level rows by Superadmins and above.
 function canManageAccount(u){
   if(!u || !currentUser) return false;
   if(u.id===currentUser.id) return isAdmin();
   if(u.role==="developer") return false;
   if(u.role==="superadmin") return isDeveloper();
-  return isAdmin();
+  return isSuperAdmin();
 }
 function canDeleteAccount(u){
   if(!u || !currentUser || u.id===currentUser.id || u.role==="developer") return false;
   if(u.role==="superadmin") return isDeveloper();
   if(u.role==="admin") return isSuperAdmin();
-  return isAdmin();
+  return isSuperAdmin();
 }
 
 function getPerm(section) {
@@ -2039,57 +2025,22 @@ function prefillRememberedCreds(){
     // type it manually — reload/relaunch must never silently authenticate anyone.
   }catch(e){ /* corrupted entry — ignore */ }
 }
-/* ===== OTP-style PIN box UI (presentation only) =====
-   These boxes are purely a visual layer over the real, single hidden
-   #pinInput that all login/security logic below already reads from and
-   writes to unchanged. The boxes never do their own credential check —
-   they just keep #pinInput's value in sync and give login/verify/error
-   feedback. */
-const otpBoxes = () => Array.from(document.querySelectorAll('#otpRow .otp-box'));
-function syncHiddenPinFromBoxes(){
-  const val = otpBoxes().map(b=>b.value).join("");
-  $("pinInput").value = val;
-  otpBoxes().forEach(b=>b.classList.toggle('mm-filled', !!b.value));
+function clearLoginPin(focusInput){
+  const input=$("pinInput");
+  input.value="";
+  if(focusInput) input.focus();
 }
-function clearOtpBoxes(focusFirst){
-  otpBoxes().forEach(b=>{ b.value=""; b.classList.remove('mm-filled'); });
-  $("pinInput").value = "";
-  if(focusFirst){ const first = otpBoxes()[0]; if(first) first.focus(); }
+function loginPinErrorAnimation(){
+  const input=$("pinInput");
+  input.classList.remove('mm-success');
+  input.classList.add('mm-shake');
+  setTimeout(()=>input.classList.remove('mm-shake'), 420);
 }
-function otpErrorAnimation(){
-  const row = $("otpRow"); if(!row) return;
-  row.classList.remove('mm-success'); row.classList.add('mm-shake');
-  setTimeout(()=>row.classList.remove('mm-shake'), 420);
+function loginPinSuccessAnimation(){
+  $("pinInput").classList.add('mm-success');
 }
-function otpSuccessAnimation(){
-  const row = $("otpRow"); if(!row) return;
-  row.classList.add('mm-success');
-}
-otpBoxes().forEach((box,i)=>{
-  box.addEventListener('input',()=>{
-    box.value = box.value.replace(/\D/g,'').slice(0,1);
-    syncHiddenPinFromBoxes();
-    if(box.value && otpBoxes()[i+1]) otpBoxes()[i+1].focus();
-    const row=$("otpRow"); if(row) row.classList.remove('mm-shake');
-  });
-  box.addEventListener('keydown',e=>{
-    if(e.key==="Backspace" && !box.value && otpBoxes()[i-1]){ otpBoxes()[i-1].focus(); }
-    else if(e.key==="ArrowLeft" && otpBoxes()[i-1]){ otpBoxes()[i-1].focus(); }
-    else if(e.key==="ArrowRight" && otpBoxes()[i+1]){ otpBoxes()[i+1].focus(); }
-    else if(e.key==="Enter"){ doLogin(); }
-  });
-  box.addEventListener('paste',e=>{
-    const text = (e.clipboardData || window.clipboardData).getData('text').replace(/\D/g,'');
-    if(!text) return;
-    e.preventDefault();
-    const digits = text.slice(0,6).split('');
-    otpBoxes().forEach((b,idx)=>{ b.value = digits[idx] || ""; });
-    syncHiddenPinFromBoxes();
-    const nextEmpty = otpBoxes().find(b=>!b.value);
-    (nextEmpty || otpBoxes()[5]).focus();
-  });
-  box.addEventListener('focus',()=>{ const row=$("otpRow"); if(row) row.classList.remove('mm-success'); });
-});
+$("pinInput").addEventListener("keydown",e=>{ if(e.key==="Enter") doLogin(); });
+$("pinInput").addEventListener("focus",()=> $("pinInput").classList.remove('mm-success'));
 
 function setLoginBtnState(state, label){
   const btn=$("loginBtn"); if(!btn) return;
@@ -2106,7 +2057,7 @@ function setLoginBtnState(state, label){
 window.doLogin = async () => {
   const err=$("loginErr"), userVal=$("usernameInput").value.trim(), pin=$("pinInput").value.trim();
   const btn=$("loginBtn");
-  if(!userVal || !pin){ err.textContent="Enter both username and PIN."; otpErrorAnimation(); return; }
+  if(!userVal || !pin){ err.textContent="Enter both username and PIN."; loginPinErrorAnimation(); return; }
   err.textContent = "";
 
   // Local-file testing / fully offline mode has no server to call (see the isLocalFileTest
@@ -2116,8 +2067,8 @@ window.doLogin = async () => {
   // sees or compares a real PIN again.
   if(!firebaseAvailable){
     const foundUser = DB.users.find(u => u.username.toLowerCase() === userVal.toLowerCase());
-    if(!foundUser || foundUser.pin !== pin){ err.textContent="Invalid username or PIN."; clearOtpBoxes(true); otpErrorAnimation(); return; }
-    otpSuccessAnimation();
+    if(!foundUser || foundUser.pin !== pin){ err.textContent="Invalid username or PIN."; clearLoginPin(true); loginPinErrorAnimation(); return; }
+    loginPinSuccessAnimation();
     setTimeout(()=>completeLogin(foundUser), 200);
     return;
   }
@@ -2145,19 +2096,19 @@ window.doLogin = async () => {
     // Real login already succeeded server-side at this point — the success animation only
     // ever plays after that, never before or instead of it.
     setLoginBtnState('success', 'Success');
-    otpSuccessAnimation();
+    loginPinSuccessAnimation();
     setTimeout(()=>completeLogin(user), 260);
   }catch(e){
     console.warn("Login failed", e);
     err.textContent = "Invalid username or PIN.";
     setLoginBtnState('error', 'Invalid PIN');
-    clearOtpBoxes(true);
-    otpErrorAnimation();
+    clearLoginPin(true);
+    loginPinErrorAnimation();
   }finally{
     if(btn && btn.getAttribute('data-state')==='loading') setLoginBtnState(null);
   }
 };
-$("usernameInput").addEventListener("keydown",e=>{ if(e.key==="Enter") { const b=otpBoxes()[0]; if(b) b.focus(); } });
+$("usernameInput").addEventListener("keydown",e=>{ if(e.key==="Enter") $("pinInput").focus(); });
 
 /* ===== UI labels (English only) ===== */
 const I18N = {
@@ -5308,9 +5259,9 @@ window.savePrefs=async(btnEl)=>{ DB.profiles[currentUser.id].dateFormat=$("p_dat
 function renderSettings(){
   $("pageBody").innerHTML=`
     <div class="card" style="max-width:600px;margin:0 auto"><div class="card-head"><span class="card-title"><i class="fas fa-key" style="color:var(--primary);margin-right:10px"></i> Change PIN</span></div>
-      <div class="form-group"><label>Current PIN</label><input id="s_cur" inputmode="numeric" type="password"></div>
-      <div class="form-group"><label>New PIN (4-6 Digits)</label><input id="s_new" inputmode="numeric" type="password" maxlength="16"></div>
-      <div class="form-group"><label>Confirm New PIN</label><input id="s_conf" inputmode="numeric" type="password" maxlength="16"></div>
+      <div class="form-group"><label for="s_cur">Current PIN</label><input id="s_cur" type="password" autocomplete="current-password"></div>
+      <div class="form-group"><label for="s_new">New PIN (8-16 Characters)</label><input id="s_new" type="password" minlength="8" maxlength="16" autocomplete="new-password"></div>
+      <div class="form-group"><label for="s_conf">Confirm New PIN</label><input id="s_conf" type="password" minlength="8" maxlength="16" autocomplete="new-password"></div>
       <button class="btn btn-primary" style="width:100%;margin-top:10px" onclick="changePin()">Update PIN</button>
     </div>
     <div class="card" style="max-width:600px;margin:22px auto 0" id="bioSettingsCard">
@@ -5328,7 +5279,7 @@ function renderSettings(){
 }
 window.changePin=async ()=>{
   const c=$("s_cur").value.trim(),n=$("s_new").value.trim(),cf=$("s_conf").value.trim();
-  if(n.length<4){ toast("PIN must be at least 4 digits"); return; }
+  if(n.length<8 || n.length>16){ toast("PIN must be 8-16 characters"); return; }
   if(n!==cf){ toast("PINs don't match"); return; }
   if(!firebaseAvailable){
     // Local-only fallback account (see doLogin) — no server to verify against.
