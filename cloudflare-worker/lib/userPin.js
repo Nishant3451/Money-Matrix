@@ -6,6 +6,12 @@
 // buttons); nothing stopped a modified client from calling the callable directly with different
 // arguments. This function is what makes them load-bearing.
 //
+// ROLE HIERARCHY (roles.js):  developer > superadmin > admin > everything else.
+//   * Nobody can create, promote-to or delete the "developer" role here; the Developer is created ONLY by /developer/bootstrap and
+//     no other account can change or remove it (the Developer can still change its own PIN through the "self" operation).
+//   * Only the Developer may create, promote, demote, reset or delete a SUPERADMIN account.
+//   * Admins can still only be deleted by a superadmin or above.
+//
 // Operations:
 //   - "self":   caller changes their own PIN. Requires currentPin to verify against the
 //               existing hash (mirrors the Settings > Change PIN currentPin field).
@@ -15,9 +21,8 @@
 //   - "delete": caller (must be admin/superadmin) removes an existing OTHER user's account.
 // ============================================================================================
 
-export function isFullAccessRole(role) {
-  return role === "superadmin" || role === "admin";
-}
+import { isFullAccessRole, roleRank, isSuperRole, ROLE_DEVELOPER, ROLE_SUPERADMIN } from "./roles.js";
+export { isFullAccessRole };
 
 /**
  * @param {{uid:string, role:string}} caller        resolved server-side from the verified ID
@@ -59,8 +64,12 @@ export function authorizeSetUserPin(caller, targetUser, payload) {
   if (payload?.delete) {
     if (isSelf) return { ok: false, error: "cannot delete your own active session" }; // mirrors delUser's id===currentUser.id guard
     if (!targetUser) return { ok: false, error: "account not found" };
-    if (targetUser.role === "superadmin") return { ok: false, error: "superadmin is protected" };
-    if (targetUser.role === "admin" && caller.role !== "superadmin") {
+    if (targetUser.role === ROLE_DEVELOPER) return { ok: false, error: "developer is protected" };
+    if (targetUser.role === ROLE_SUPERADMIN) {
+      if (caller.role !== ROLE_DEVELOPER) return { ok: false, error: "only the developer may remove a superadmin" };
+      return { ok: true, op: "delete" };
+    }
+    if (targetUser.role === "admin" && !isSuperRole(caller.role)) {
       return { ok: false, error: "insufficient clearance to delete admin" };
     }
     return { ok: true, op: "delete" };
@@ -69,22 +78,28 @@ export function authorizeSetUserPin(caller, targetUser, payload) {
   // --- Create (target doesn't exist yet) -------------------------------------------------------
   if (!targetUser) {
     const newRole = payload?.role || "user";
-    if (newRole === "superadmin" && caller.role !== "superadmin") {
-      return { ok: false, error: "only superadmin may grant the superadmin role" };
+    if (newRole === ROLE_DEVELOPER) return { ok: false, error: "the developer role cannot be granted" };
+    if (newRole === ROLE_SUPERADMIN && caller.role !== ROLE_DEVELOPER) {
+      return { ok: false, error: "only the developer may grant the superadmin role" };
+    }
+    if (roleRank(newRole) >= roleRank(caller.role) && roleRank(newRole) >= 2 && caller.role !== ROLE_DEVELOPER) {
+      return { ok: false, error: "insufficient clearance to grant that role" };
     }
     if (!payload?.newPin) return { ok: false, error: "newPin is required to create an account" };
     return { ok: true, op: "create" };
   }
 
   // --- Update an existing OTHER user -----------------------------------------------------------
-  if (targetUser.role === "superadmin" && caller.role !== "superadmin") {
-    return { ok: false, error: "insufficient clearance to edit a superadmin account" };
+  if (targetUser.role === ROLE_DEVELOPER) return { ok: false, error: "developer is protected" };
+  if (targetUser.role === ROLE_SUPERADMIN && caller.role !== ROLE_DEVELOPER) {
+    return { ok: false, error: "only the developer may change a superadmin account" };
   }
   const newRole = payload?.role;
-  if (newRole && newRole === "superadmin" && caller.role !== "superadmin") {
-    return { ok: false, error: "only superadmin may grant the superadmin role" };
+  if (newRole && newRole === ROLE_DEVELOPER) return { ok: false, error: "the developer role cannot be granted" };
+  if (newRole && newRole === ROLE_SUPERADMIN && caller.role !== ROLE_DEVELOPER) {
+    return { ok: false, error: "only the developer may grant the superadmin role" };
   }
-  if (payload?.renameFrom && caller.role !== "superadmin") {
+  if (payload?.renameFrom && !isSuperRole(caller.role)) {
     return { ok: false, error: "only superadmin may rename a login username" };
   }
   return { ok: true, op: "update" };

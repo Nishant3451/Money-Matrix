@@ -304,14 +304,16 @@ test("superadmin: explicit recordDeletes work for any record (and absence still 
 test("forged ownerId / ACL from a delegated EDITOR through direct API calls (hand-built blobs) change nothing", async () => {
   const a = acl(3, [g("mgr", "edit")]);
   const w = makeWorld(bucketDoc([rec("p1", "emp", { acl: a })]));
-  const blob = { perUser: { emp: { transactions: [{ id: "p1", ownerId: "mgr", customer: "ok", amount: 1, acl: acl(99, [g("mgr", "edit", "delete", "acl"), g("other", "edit")]) }] }, mgr: { transactions: [{ id: "p1", ownerId: "mgr", customer: "planted", acl: acl(1, []) }], quotations: [] } } };
+  const blob = { perUser: { emp: { transactions: [{ id: "p1", ownerId: "mgr", customer: "ok", amount: 1, acl: acl(99, [g("mgr", "edit", "delete", "acl"), g("other", "edit")]) }] }, mgr: { transactions: [{ id: "p1", ownerId: "mgr", customer: "copy-of-existing-id", acl: acl(1, []) }, { id: "p2", ownerId: "mgr", customer: "planted", acl: acl(1, []) }], quotations: [] } } };
   await call(w, "mgr", "/data/save", { json: JSON.stringify(blob) });
   const r = inBucket(w, "p1");
   assert.equal(r.customer, "ok");
   assert.equal(r.ownerId, "emp");
   assert.deepEqual(r.acl, a);
-  const planted = find(w.state.doc.perUser.mgr.transactions, "p1");
+  const planted = find(w.state.doc.perUser.mgr.transactions, "p2");
   assert.equal("acl" in planted, false, "a record the grantee creates in their OWN bucket is always inherit");
+  // Ownership moves only through /record/assign: a copy of an EXISTING record's id placed in someone else's bucket is refused.
+  assert.equal(find(w.state.doc.perUser.mgr.transactions, "p1"), undefined, "an id the server already holds at another location is not a new record");
 });
 
 // --------------------------------------------------------------------------------------------

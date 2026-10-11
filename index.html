@@ -819,6 +819,9 @@ function beginSession(){ sessionEnding = false; authGeneration++; requestedDataS
 // Optional third argument { timeoutMs }: abort the HTTP request after that long. Only the
 // Privacy Center passes it (see PRIVACY_API_TIMEOUT_MS) so a hung request can't leave a button
 // stuck on "Loading…" forever; every other caller is unchanged (no timeout, as before).
+// The Worker's refusals carry a human-readable message and a machine code ({error:{message, code, currentOwner|currentRev}}).
+// Surface them ADDITIONALLY on the thrown error (serverMessage / serverCode / serverDetails) so the assignment, access and Developer
+// screens can show a meaningful reason; error.code / error.message stay exactly as before for every existing caller.
 async function callWorkerApi(path, body, opts) {
   const gen = authGeneration;
   const ended = () => sessionEnding || gen !== authGeneration;
@@ -843,6 +846,15 @@ async function callWorkerApi(path, body, opts) {
       throw e;
     } finally { if (timer) clearTimeout(timer); }
   };
+  async function apiErrorDetails(resp){
+    try{
+      const b = await resp.clone().json();
+      const e = b && b.error;
+      if(!e || typeof e !== "object") return {};
+      const { message, code, ...rest } = e;
+      return { serverMessage: typeof message === "string" ? message : "", serverCode: typeof code === "string" ? code : "", serverDetails: rest };
+    }catch(_){ return {}; }
+  }
   let resp;
   try {
     resp = await doFetch(await auth.currentUser.getIdToken());
@@ -875,7 +887,7 @@ async function callWorkerApi(path, body, opts) {
     let policyGateData = null;
     try { const cloned = await resp.clone().json(); if (cloned?.error?.code === "POLICY_ACCEPTANCE_REQUIRED") policyGateData = cloned.data || {}; } catch (e) { /* not JSON / no body — fall through to the generic 403 below */ }
     if (policyGateData) throw Object.assign(new Error("Policy acceptance required"), { code: "policy/acceptance-required", status: 403, policyGateData });
-    throw Object.assign(new Error("Not authorized"), { code: "functions/permission-denied", status: 403 });
+    throw Object.assign(Object.assign(new Error("Not authorized"), { code: "functions/permission-denied", status: 403 }), await apiErrorDetails(resp));
   }
   if (resp.status === 429) {
     // The Worker's privacy rate limits answer 429. This used to fall into the generic branch
@@ -883,11 +895,14 @@ async function callWorkerApi(path, body, opts) {
     throw Object.assign(new Error("Too many requests"), { code: "functions/resource-exhausted", status: 429 });
   }
   if (!resp.ok) {
-    throw Object.assign(new Error("Request failed"), { code: "functions/internal", status: resp.status });
+    throw Object.assign(Object.assign(new Error("Request failed"), { code: "functions/internal", status: resp.status }), await apiErrorDetails(resp));
   }
   const out = await resp.json();
   if (ended()) throw endedError();
   return out;
+}
+function apiErrorText(e, fallback){
+  return (e && typeof e.serverMessage === "string" && e.serverMessage) ? e.serverMessage : fallback;
 }
 
 let requestedDataScope = null; // widest scope the SERVER told us we may hold (descriptor.max); null = ask for the default
@@ -1104,7 +1119,7 @@ function ensure(allowAutoFix = false){
   }
   
   DB.users.forEach(u=>{
-    if(!DB.permissions[u.role]) {
+    if(u.role!=='developer' && !DB.permissions[u.role]) {
        DB.permissions[u.role] = { dashboard:"view", marathon:"hidden", club:"hidden", coaches:"hidden", supervisors:"hidden", gifts:"hidden", worldteam:"view", getteam:"view", milteam:"view", presteam:"view", backup:"hidden" };
     }
     if(!DB.profiles[u.id]) DB.profiles[u.id]={displayName:u.username,phone:"",email:"",bio:"",theme:"light",dateFormat:"UK"};
@@ -1613,7 +1628,7 @@ function scopeIdFor(coll, item){
   if(coll==='supervisors') return item.id;
   return null; // transactions/gifts have no supervisor hierarchy link in this data model
 }
-const commitItem = (coll, item, msg) => {
+const commitItem = (coll, item, msg, opts) => {
   const d = data();
   const i = d[coll].findIndex(x => x.id === item.id);
   const meta = ACTIVITY_LABELS[coll];
@@ -1628,12 +1643,70 @@ const commitItem = (coll, item, msg) => {
     d[coll][i] = item;
   } else d[coll].push(item);
   if(meta) logActivity(i>=0 ? 'updated' : 'added', coll, item[meta.nameKey], scopeIdFor(coll,item));
-  save(true); closeModal(); render(); toast(msg);
+  const saved = save(true); closeModal(); render(); toast(msg);
+  // "Assigned To": ownership never travels in /data/save, so a different assignee is applied through the dedicated, server-validated
+  // /record/assign call once the record itself has been saved. `opts.expectedOwner` is who the record belongs to right now.
+  if(opts && opts.assignTo && opts.assignTo !== opts.expectedOwner && (coll === 'transactions' || coll === 'quotations')){
+    assignAfterSave(saved, coll, item.id, DB.settings.dataSharing ? null : (viewingAs||currentUser.id), opts.expectedOwner === undefined ? null : opts.expectedOwner, opts.assignTo);
+  }
 };
+async function assignAfterSave(savePromise, coll, id, bucket, expectedOwner, targetUid){
+  const r = await savePromise;
+  if(!r || !r.ok){ toast("The record could not be saved, so it was not assigned."); return; }
+  try{
+    await callWorkerApi("/record/assign", { collection: coll, id, bucket, expectedOwner, targetUid });
+    toast("Assigned to " + ownerLabel(targetUid));
+    await fetchAuthorizedData();
+  }catch(e){
+    if(isSessionEndError(e)) return;
+    toast(apiErrorText(e, "Could not assign this record") + " -- the record was saved but is still with its previous owner.");
+  }
+}
+// Display name for a person id (profile name, falling back to the username, then the id).
+function ownerLabel(uid){
+  if(!uid) return "Unassigned (legacy record)";
+  const u = (DB.users||[]).find(x=>x.id===uid);
+  const dn = DB.profiles && DB.profiles[uid] && DB.profiles[uid].displayName;
+  return dn || (u && u.username) || String(uid);
+}
+// The "Assigned To" field of the Payment / Quotation forms. Options come ONLY from the server's authorized list
+// (serverDataScope.assignTargets): never every user, never anyone the Worker would refuse. Separate from the Client field.
+function assigneeFieldHtml(coll, selectId, existingOwner, isEdit){
+  const ds = serverDataScope;
+  const list = firebaseAvailable && ds && ds.assignTargets && Array.isArray(ds.assignTargets[coll]) ? ds.assignTargets[coll] : null;
+  if(!list || !list.length) return "";
+  const me = viewingAs || currentUser.id;
+  const owner = isEdit ? (existingOwner || "") : me;
+  const inList = list.some(p=>p.uid===owner);
+  const opt = (value, label, sel) => `<option value="${esc(value)}"${sel?" selected":""}>${esc(label)}</option>`;
+  let html = list.map(p=>opt(p.uid, p.name + (p.username && p.username !== p.name ? ` (@${p.username})` : ""), p.uid===owner)).join("");
+  if(!inList) html = opt(owner, owner ? ownerLabel(owner) + " (current owner)" : "Unassigned (legacy record)", true) + html;
+  const locked = list.length === 1 && inList; // nobody else to choose: show the owner, read-only
+  return `<div class="form-group"><label for="${selectId}">Assigned To</label><select id="${selectId}" ${locked?"disabled":""}>${html}</select><div class="desc" style="font-size:.72rem;color:var(--text-muted);margin-top:4px">Who owns this record. Separate from the client; editing a record never changes it.</div></div>`;
+}
 
 /* Permissions & Scoping Engine */
-function isSuperAdmin(){ return currentUser?.role==="superadmin"; }
-function isAdmin(){ return currentUser?.role==="admin" || currentUser?.role==="superadmin"; }
+// Role hierarchy: developer > superadmin > admin > everything else. The Developer holds every Super Admin power (isSuperAdmin() is
+// true for both); isDeveloper() is the extra tier that manages Super Admin accounts and the scope policy. All of this is only a
+// UI convenience -- the Worker re-derives the role from the verified token + stored record on every request.
+function isDeveloper(){ return currentUser?.role==="developer"; }
+function isSuperAdmin(){ return currentUser?.role==="superadmin" || currentUser?.role==="developer"; }
+function isAdmin(){ return currentUser?.role==="admin" || currentUser?.role==="superadmin" || currentUser?.role==="developer"; }
+// May the signed-in account open the account editor for `u`?  Developer rows are only ever editable by the Developer themself;
+// Super Admin rows only by the Developer (or their owner for profile fields); everyone below by admins and above.
+function canManageAccount(u){
+  if(!u || !currentUser) return false;
+  if(u.id===currentUser.id) return isAdmin();
+  if(u.role==="developer") return false;
+  if(u.role==="superadmin") return isDeveloper();
+  return isAdmin();
+}
+function canDeleteAccount(u){
+  if(!u || !currentUser || u.id===currentUser.id || u.role==="developer") return false;
+  if(u.role==="superadmin") return isDeveloper();
+  if(u.role==="admin") return isSuperAdmin();
+  return isAdmin();
+}
 
 function getPerm(section) {
   if (isSuperAdmin()) return 'write'; 
@@ -2132,6 +2205,7 @@ const NAV=[
   {id:"presteam",label:"President's Team",icon:"fa-crown", req:"presteam", section:"Recognition"},
   {id:"backup",label:"Data Management",icon:"fa-database", req:"backup", section:"System"},
   {id:"admin",label:"User Management",icon:"fa-users-cog", adminOnly:true, section:"System"},
+  {id:"devconsole",label:"Developer Console",icon:"fa-terminal", developerOnly:true, section:"System"},
   {id:"permissions",label:"Access Control",icon:"fa-user-lock", superAdminOnly:true, section:"System"},
   {id:"individualaccess",label:"Individual Access",icon:"fa-user-check", superAdminOnly:true, section:"System"},
   {id:"sectionmanager",label:"Custom Sections",icon:"fa-folder-plus", superAdminOnly:true, section:"System"},
@@ -2146,6 +2220,7 @@ function buildNav(){
   const sectionKeyMap = {Overview:"sec_overview", Operations:"sec_operations", Recognition:"sec_recognition", System:"sec_system", Account:"sec_account"};
   let lastSection = null;
   $("navList").innerHTML=fullNav.map(n=>{
+    if(n.developerOnly && !isDeveloper()) return "";
     if(n.superAdminOnly && !isSuperAdmin()) return "";
     if(n.adminOnly && !isAdmin()) return "";
     if(n.req && !canView(n.req)) return "";
@@ -2264,6 +2339,7 @@ function render(){
   if(policyGateActive() && activePage !== "privacy") activePage = "privacy";
   if(NAV.find(n=>n.id===activePage)?.req && !canView(activePage)) activePage = "dashboard";
   if(activePage==="admin" && !isAdmin()) activePage="dashboard";
+  if(activePage==="devconsole" && !isDeveloper()) activePage="dashboard";
   if(activePage==="permissions" && !isSuperAdmin()) activePage="dashboard";
   if(activePage==="individualaccess" && !isSuperAdmin()) activePage="dashboard";
   if(activePage==="sectionmanager" && !isSuperAdmin()) activePage="dashboard";
@@ -2280,8 +2356,8 @@ function render(){
   // Section-aware tab title (history / task switcher / PWA window). Set AFTER every guard above has
   // settled activePage, so a gated or unauthorised user's title never names a page they can't see.
   setDocTitle();
-  const map={dashboard:renderDash,marathon:renderMarathon,club:renderClub,coaches:renderCoaches,supervisors:renderSupervisors,gifts:renderGifts,products:renderProducts,quotations:renderQuotations,worldteam:()=>renderRankSection('worldteam'),getteam:()=>renderRankSection('getteam'),milteam:()=>renderRankSection('milteam'),presteam:()=>renderRankSection('presteam'),backup:renderBackup,admin:renderAdmin,permissions:renderPermissions,individualaccess:renderIndividualAccess,sectionmanager:renderSectionManager,profile:renderProfile,settings:renderSettings,privacy:renderPrivacyCenter};
-  const titles={dashboard:"Dashboard Overview",marathon:"Payments",club:"Club Membership",coaches:"Club Coaches",supervisors:"Supervisors",gifts:"Gifts & Rewards",products:"Products",quotations:"Quotations",worldteam:"World Team",getteam:"GET Team",milteam:"Millionaire Team",presteam:"President's Team",backup:"Data Management",admin:"User Management",permissions:"Access Control Manager",individualaccess:"Individual Access",sectionmanager:"Custom Sections",profile:"My Profile",settings:"Account Settings",privacy:"Privacy Center"};
+  const map={dashboard:renderDash,marathon:renderMarathon,club:renderClub,coaches:renderCoaches,supervisors:renderSupervisors,gifts:renderGifts,products:renderProducts,quotations:renderQuotations,worldteam:()=>renderRankSection('worldteam'),getteam:()=>renderRankSection('getteam'),milteam:()=>renderRankSection('milteam'),presteam:()=>renderRankSection('presteam'),backup:renderBackup,admin:renderAdmin,permissions:renderPermissions,individualaccess:renderIndividualAccess,sectionmanager:renderSectionManager,devconsole:renderDevConsole,profile:renderProfile,settings:renderSettings,privacy:renderPrivacyCenter};
+  const titles={dashboard:"Dashboard Overview",marathon:"Payments",club:"Club Membership",coaches:"Club Coaches",supervisors:"Supervisors",gifts:"Gifts & Rewards",products:"Products",quotations:"Quotations",worldteam:"World Team",getteam:"GET Team",milteam:"Millionaire Team",presteam:"President's Team",backup:"Data Management",admin:"User Management",permissions:"Access Control Manager",individualaccess:"Individual Access",sectionmanager:"Custom Sections",devconsole:"Developer Console",profile:"My Profile",settings:"Account Settings",privacy:"Privacy Center"};
   const translatedTitle = I18N.en[activePage] ? t(activePage) : (titles[activePage]||"Dashboard");
   topbar(translatedTitle);
   (map[activePage]||renderDash)();
@@ -2789,6 +2865,7 @@ window.txModal=(t={})=>{
       <div class="client-combo-list" id="clientComboList" style="display:none"></div>
     </div>
   </div>
+  ${assigneeFieldHtml('transactions','f_assignee', t.ownerId, !!t.id)}
   <div class="form-group"><label>Product / Description</label><input id="f_prod" value="${esc(t.product||"")}"></div>
   <div class="form-group"><label>Payment Type</label><select id="f_type"><option value="received"${t.type!=='sent'?' selected':''}>Received (Credit)</option><option value="sent"${t.type==='sent'?' selected':''}>Sent (Debit)</option></select></div>
   <div class="form-group"><label>Amount</label><input id="f_amt" type="number" inputmode="numeric" value="${t.amount||""}"></div>
@@ -2800,13 +2877,17 @@ window.txModal=(t={})=>{
 window.saveTx=(id,date)=>{
   const customer=$("f_cust").value.trim(); if(!customer) return toast("Customer name required");
   const status=$("f_stat").value;
+  // Read the "Assigned To" choice NOW: the possible-duplicate confirmation below replaces this form before finalize() runs.
+  const assigneeEl=$("f_assignee");
+  const existingTx = id ? (data().transactions||[]).find(x=>x.id===id) : null;
+  const assignOpts = assigneeEl && !assigneeEl.disabled ? { assignTo: assigneeEl.value || null, expectedOwner: id ? ((existingTx && existingTx.ownerId) || (DB.settings.dataSharing ? null : (viewingAs||currentUser.id))) : (viewingAs||currentUser.id) } : undefined;
   const finalize=(clientId)=>{
     commitItem('transactions', {
       id: id||nid(), customer, clientId: clientId||null, product:$("f_prod").value.trim(), type:$("f_type").value,
       amount:+$("f_amt").value||0, status, notes:$("f_notes").value.trim(),
       date: date||new Date().toISOString(), completedDate: status==='completed'?new Date().toISOString():null,
       ownerId: viewingAs||currentUser.id, lastEditedBy: getEditor()
-    }, id ? "Payment updated" : "Payment added");
+    }, id ? "Payment updated" : "Payment added", assignOpts);
   };
   if(txSelectedClientId){
     const c=findClientById(txSelectedClientId);
@@ -3776,7 +3857,7 @@ function renderProducts(){
 window.updateSectionAccess = (section, userId, level) => {
   if(!isSuperAdmin()) return;
   const target = DB.users.find(u=>u.id===userId);
-  if(!target || target.role==='superadmin') return;
+  if(!target || target.role==='superadmin' || target.role==='developer') return;
   if(!DB.userPermissions[userId]) DB.userPermissions[userId] = {};
   if(level === 'default') delete DB.userPermissions[userId][section];
   else DB.userPermissions[userId][section] = level;
@@ -3790,7 +3871,7 @@ window.manageProductAccess = () => {
 // on purpose: PART G asks for the same principle on Quotations/Invoices, so quotationAccessModal
 // below reuses this rather than duplicating the markup.
 function manageSectionAccessHtml(section, title, note){
-  const rows = DB.users.filter(u=>u.role!=='superadmin').map(u=>{
+  const rows = DB.users.filter(u=>u.role!=='superadmin' && u.role!=='developer').map(u=>{
     const lvl = DB.userPermissions?.[u.id]?.[section] || 'default';
     const roleDefault = (DB.permissions?.[u.role]?.[section]) || (u.role==='admin' ? 'write' : (section==='dashboard'?'view':'hidden'));
     return `<div class="perm-row">
@@ -3905,6 +3986,7 @@ window.quotationModal=(q={})=>{
       <div class="form-group" style="flex:1;min-width:160px"><label>Customer Name</label><input id="q_customer" value="${esc(q.customerName||"")}" placeholder="Who is this quote for?"></div>
       <div class="form-group" style="flex:1;min-width:140px"><label>Phone (optional)</label><input id="q_phone" value="${esc(q.customerPhone||"")}"></div>
     </div>
+    ${assigneeFieldHtml('quotations','q_assignee', q.ownerId, !!q.id)}
     <input type="hidden" id="q_memberId" value="${esc(q.memberId||"")}">
     <input type="hidden" id="q_showDiscount" value="${q.showDiscount===false?'0':'1'}">
     <div class="form-row">
@@ -4013,6 +4095,8 @@ window.saveQuotation=id=>{
   const d=data();
   const existing = id ? (d.quotations||[]).find(x=>x.id===id) : null;
   const quoteNumber = existing?.quoteNumber || nextQuoteNumber();
+  const qAssigneeEl=$("q_assignee");
+  const qAssignOpts = qAssigneeEl && !qAssigneeEl.disabled ? { assignTo: qAssigneeEl.value || null, expectedOwner: id ? ((existing && existing.ownerId) || (DB.settings.dataSharing ? null : (viewingAs||currentUser.id))) : (viewingAs||currentUser.id) } : undefined;
   commitItem('quotations', {
     id: id||nid(), customerName, customerPhone: $("q_phone").value.trim(), memberId: $("q_memberId").value||null,
     date: dateVal ? new Date(dateVal).toISOString() : new Date().toISOString(),
@@ -4021,7 +4105,7 @@ window.saveQuotation=id=>{
     showDiscount: $("q_showDiscount") ? $("q_showDiscount").value !== '0' : true,
     notes: $("q_notes").value.trim(),
     ownerId: viewingAs||currentUser.id, lastEditedBy: getEditor()
-  }, id ? "Quotation updated" : "Quotation created");
+  }, id ? "Quotation updated" : "Quotation created", qAssignOpts);
 };
 function nextQuoteNumber(){
   const d=data();
@@ -4777,7 +4861,7 @@ const INDIV_SECTIONS_BASE = () => [
 ];
 function renderIndividualAccess() {
   if(!isSuperAdmin()) { activePage = "dashboard"; render(); return; }
-  if(!indivSelectedUser && DB.users.length) indivSelectedUser = DB.users.find(u=>u.role!=='superadmin')?.id || DB.users[0].id;
+  if(!indivSelectedUser && DB.users.length) indivSelectedUser = DB.users.find(u=>u.role!=='superadmin' && u.role!=='developer')?.id || DB.users[0].id;
 
   const userOptions = DB.users.map(u=>`<option value="${u.id}"${indivSelectedUser===u.id?' selected':''}>${esc(DB.profiles[u.id]?.displayName || u.username)} (${u.role})</option>`).join("");
 
@@ -4808,7 +4892,7 @@ function renderIndividualAccessGrid(){
   const selUser = DB.users.find(u=>u.id===indivSelectedUser);
   const overrides = DB.userPermissions?.[indivSelectedUser] || {};
   const grid = $("indiv_grid"); if(!grid) return;
-  grid.innerHTML = selUser?.role==='superadmin' ? `<div class="empty"><i class="fas fa-crown"></i>${esc(DB.profiles[selUser.id]?.displayName||selUser.username)} is a Super Admin and always has full access everywhere.</div>` : `
+  grid.innerHTML = (selUser?.role==='superadmin' || selUser?.role==='developer') ? `<div class="empty"><i class="fas fa-crown"></i>${esc(DB.profiles[selUser.id]?.displayName||selUser.username)} is a Super Admin and always has full access everywhere.</div>` : `
       <div class="perm-grid">
         ${sections.length ? sections.map(s => {
           const lvl = overrides[s.id] || 'default';
@@ -4878,6 +4962,168 @@ window.performResetUserPin = async (userId) => {
     toast("Couldn't reset PIN — try again");
   }
 };
+/* ===== Developer Console (Developer-only). Every control here calls a server-validated endpoint; the UI only reflects what the server returned. ===== */
+let devSel = null, devColl = "transactions", devMsg = "";
+function devCtl(){ return (serverDataScope && serverDataScope.control) || null; }
+function devAllRecords(coll){
+  const out = [];
+  const sh = DB.shared && Array.isArray(DB.shared[coll]) ? DB.shared[coll] : [];
+  sh.forEach(r => { if(r && typeof r === "object") out.push({ rec:r, bucket:null, owner:(typeof r.ownerId === "string" && r.ownerId) ? r.ownerId : null }); });
+  Object.keys(DB.perUser || {}).forEach(b => {
+    const arr = DB.perUser[b] && Array.isArray(DB.perUser[b][coll]) ? DB.perUser[b][coll] : [];
+    arr.forEach(r => { if(r && typeof r === "object") out.push({ rec:r, bucket:b, owner:b }); });
+  });
+  return out;
+}
+function devRecLabel(coll, r){
+  if(coll === "quotations") return (r.number ? String(r.number) + " · " : "") + (r.clientName || r.client || r.title || r.id);
+  return (r.name || r.clientName || r.client || r.memberName || r.id) + (r.amount !== undefined ? " · " + money(Number(r.amount) || 0) : "");
+}
+function devErr(e, fallback){ return apiErrorText(e, fallback); }
+async function devRefresh(msg){ devMsg = msg || ""; try{ await fetchAuthorizedData(); }catch(e){ /* keep the message below */ } if(activePage === "devconsole") render(); }
+window.devSelectUser = v => { devSel = v || null; render(); };
+window.devSelectColl = v => { devColl = v === "quotations" ? "quotations" : "transactions"; render(); };
+async function devPolicyCall(change, okMsg){
+  const c = devCtl();
+  if(!c || !c.scopePolicy){ toast("Scope policy is not available."); return; }
+  try{
+    await callWorkerApi("/scope/policy", { baseRev: c.scopePolicy.rev, ...change });
+    await devRefresh(okMsg);
+  }catch(e){
+    if(isSessionEndError(e)) return;
+    if(e && e.serverCode === "POLICY_STALE"){ await devRefresh("The policy was changed elsewhere — reloaded the latest. Please redo your change."); return; }
+    toast(devErr(e, "Could not update the scope policy"));
+    render();
+  }
+}
+window.devToggleScope = (uid, key, checked) => {
+  const c = devCtl(); if(!c) return;
+  const cur = (c.scopePolicy && c.scopePolicy.users && c.scopePolicy.users[uid]) || {};
+  const policy = { ...cur, [key]: !!checked };
+  return devPolicyCall({ user: { uid, policy } }, "Scope options saved.");
+};
+window.devResetScope = uid => { return devPolicyCall({ user: { uid, policy: null } }, "Scope options reset to defaults."); };
+window.devToggleGlobal = checked => { return devPolicyCall({ global: { superadminAll: !!checked } }, checked ? "Superadmins may use All Data." : "All Data withdrawn from Superadmins."); };
+window.devToggleDisabled = async uid => {
+  const u = (DB.users || []).find(x => x.id === uid);
+  if(!u || !isDeveloper() || u.role === "developer") return;
+  const disable = u.disabled !== true;
+  try{
+    await callWorkerApi("/user/disable", { targetUserId: uid, disabled: disable });
+    await devRefresh(disable ? "Account disabled." : "Account enabled.");
+  }catch(e){
+    if(isSessionEndError(e)) return;
+    toast(devErr(e, "Could not change this account"));
+  }
+};
+window.devAssign = async (coll, id, bucket, owner, selId) => {
+  const target = $(selId) && $(selId).value;
+  if(!target){ toast("Choose who to assign this to."); return; }
+  try{
+    await callWorkerApi("/record/assign", { collection: coll, id, bucket, expectedOwner: owner, targetUid: target });
+    await devRefresh("Reassigned to " + ownerLabel(target) + ".");
+  }catch(e){
+    if(isSessionEndError(e)) return;
+    toast(devErr(e, "Could not reassign this record"));
+    if(e && e.serverCode === "OWNER_STALE") await devRefresh("That record changed owner meanwhile — reloaded.");
+  }
+};
+window.devAclModal = (coll, id, bucket) => {
+  const hit = devAllRecords(coll).find(x => x.rec.id === id && x.bucket === bucket);
+  if(!hit){ toast("Record not found."); return; }
+  const acl = hit.rec.acl && typeof hit.rec.acl === "object" ? hit.rec.acl : null;
+  const restricted = !!(acl && Array.isArray(acl.grants));
+  const grants = restricted ? acl.grants : [];
+  const rev = acl && Number.isInteger(acl.rev) ? acl.rev : 0;
+  const people = (DB.users || []).filter(u => u.id !== hit.owner && u.role !== "developer" && u.role !== "superadmin" && u.disabled !== true);
+  const rows = people.map(u => {
+    const g = grants.find(x => x.uid === u.id); const has = p => !!(g && g.perms.includes(p));
+    return `<tr><td>${esc(ownerLabel(u.id))}<div style="font-size:11px;color:var(--text-muted)">${esc(u.role)}</div></td>`
+      + ["view","edit","delete"].map(p => `<td style="text-align:center"><input type="checkbox" data-acl-uid="${esc(u.id)}" data-acl-perm="${p}" ${has(p) ? "checked" : ""} aria-label="${esc(p + " for " + ownerLabel(u.id))}"></td>`).join("") + `</tr>`;
+  }).join("");
+  showModal(`<div class="modal-head"><h3>Record access</h3><button class="modal-close" onclick="closeModal()">×</button></div>
+    <div class="modal-body">
+      <p style="font-size:13px">${esc(devRecLabel(coll, hit.rec))} — owner: <b>${esc(ownerLabel(hit.owner))}</b>. ${restricted ? "Access is <b>restricted</b> to the people ticked below." : "Access is <b>inherited</b> from the data-scope rules (nobody has been granted anything specific)."}</p>
+      <div style="overflow:auto"><table class="tbl"><thead><tr><th>Person</th><th>View</th><th>Edit</th><th>Delete</th></tr></thead><tbody>${rows || `<tr><td colspan="4">No eligible people.</td></tr>`}</tbody></table></div>
+      <p style="font-size:12px;color:var(--text-muted)">Edit and Delete imply View. Superadmins and the Developer always have full access, so they are not listed.</p>
+    </div>
+    <div class="modal-foot"><button class="btn btn-gray" onclick="closeModal()">Cancel</button>
+      ${restricted ? `<button class="btn btn-amber" onclick="devAclSave(${sj(coll)},${sj(id)},${sj(bucket)},${rev},true)">Revert to inherited</button>` : ""}
+      <button class="btn btn-primary" onclick="devAclSave(${sj(coll)},${sj(id)},${sj(bucket)},${rev},false)">Save access</button></div>`, { wide:true });
+};
+window.devAclSave = async (coll, id, bucket, rev, revert) => {
+  let grants = null;
+  if(!revert){
+    const by = {};
+    document.querySelectorAll("#modalRoot [data-acl-uid]").forEach(cb => { if(cb.checked){ (by[cb.dataset.aclUid] = by[cb.dataset.aclUid] || []).push(cb.dataset.aclPerm); } });
+    grants = Object.keys(by).map(uid => ({ uid, perms: by[uid] }));
+  }
+  try{
+    await callWorkerApi("/record/acl", { collection: coll, id, bucket, baseRev: rev, grants });
+    closeModal();
+    await devRefresh(revert ? "Access reverted to inherited." : "Access saved.");
+  }catch(e){
+    if(isSessionEndError(e)) return;
+    toast(devErr(e, "Could not change access for this record"));
+  }
+};
+function devAuditRows(){
+  const c = devCtl() || {};
+  const a = (Array.isArray(c.accessAudit) ? c.accessAudit : []).map(x => ({ ts:x.ts, actor:x.actor, what: x.action === "assign" ? `reassigned ${x.coll} ${x.recId} from ${ownerLabel(x.from)} to ${ownerLabel(x.to)}` : x.action === "scope_policy" ? ("scope policy r" + x.rev + (x.target ? " for " + ownerLabel(x.target) : "") + (x.global ? " (Superadmins All Data: " + (x.global.superadminAll ? "on" : "off") + ")" : "")) : String(x.action || "change") }));
+  const b = (Array.isArray(c.recordAclAudit) ? c.recordAclAudit : []).map(x => ({ ts:x.ts, actor:x.actor, what:`access ${x.action === "reset_inherit" ? "reverted to inherited" : "set (" + (x.grantCount || 0) + " grant(s))"} on ${x.coll} ${x.recId}` }));
+  return a.concat(b).sort((p, q) => (q.ts || 0) - (p.ts || 0)).slice(0, 100);
+}
+function renderDevConsole(){
+  if(!isDeveloper()){ activePage = "dashboard"; render(); return; }
+  const c = devCtl();
+  const users = (DB.users || []).slice();
+  if(!devSel || (devSel !== "__legacy" && !users.find(u => u.id === devSel))) devSel = users.length ? users[0].id : null;
+  const u = users.find(x => x.id === devSel);
+  const pol = (c && c.scopePolicy) || { rev:0, global:{ superadminAll:true }, users:{} };
+  const eff = (u && c && c.effective && c.effective[u.id]) || null;
+  const userPol = (u && pol.users && pol.users[u.id]) || {};
+  const tog = (key, label, on, disabled) => `<label style="display:flex;gap:8px;align-items:center;margin:6px 0"><input type="checkbox" ${on ? "checked" : ""} ${disabled ? "disabled" : ""} onchange="devToggleScope(${sj(u ? u.id : "")},${sj(key)},this.checked)"> ${esc(label)}</label>`;
+  let scopeCard = "";
+  if(u){
+    const isDev = u.role === "developer", isSup = u.role === "superadmin";
+    const allowedTxt = eff ? [].concat(eff.allowed || []).join(", ") : "—";
+    scopeCard = `<div class="card"><div class="card-head"><span class="card-title">${esc(ownerLabel(u.id))} <span class="pill pill-purple">${esc(u.role)}</span>${u.disabled === true ? ` <span class="pill pill-red">DISABLED</span>` : ""}</span></div>
+      <p style="font-size:13px">Effective data scope (server-computed, applies to Payments and Quotations separately): <b>${esc(allowedTxt)}</b>${eff && eff.max ? ` · widest: <b>${esc(String(eff.max))}</b>` : ""}</p>
+      ${isDev ? `<p style="font-size:13px">The Developer always holds All Data and cannot be restricted.</p>` : `
+        <div style="margin:8px 0"><b style="font-size:13px">Scope options this person may use</b>
+          ${tog("downline", "Downline (people under them)", userPol.downline !== false)}
+          ${tog("upline", "Upline (read-only view of people above them)", userPol.upline !== false)}
+          ${isSup ? tog("all", "All Data", userPol.all !== false && pol.global.superadminAll !== false, pol.global.superadminAll === false) : `<div style="font-size:12px;color:var(--text-muted)">All Data is never available to Admins or Users.</div>`}
+          <div style="font-size:12px;color:var(--text-muted)">My Data is always available. Upline is read-only.</div>
+          <button class="btn btn-sm btn-gray" onclick="devResetScope(${sj(u.id)})">Reset to defaults</button></div>`}
+      ${isDev ? "" : `<button class="btn btn-sm ${u.disabled === true ? "btn-primary" : "btn-red"}" onclick="devToggleDisabled(${sj(u.id)})">${u.disabled === true ? "Enable account" : "Disable account"}</button>`}</div>`;
+  }
+  const recs = devAllRecords(devColl).filter(x => devSel === "__legacy" ? (x.bucket === null && !x.owner) : x.owner === devSel);
+  const targets = users.filter(x => x.disabled !== true && x.role !== "developer" || x.role === "developer");
+  const recRows = recs.slice(0, 200).map((x, i) => {
+    const sel = "devAs" + i;
+    return `<tr><td>${esc(devRecLabel(devColl, x.rec))}</td><td>${x.rec.acl && Array.isArray(x.rec.acl.grants) ? "Restricted" : "Inherited"}</td>
+      <td><select id="${sel}" aria-label="Assign to">${targets.map(t => `<option value="${esc(t.id)}">${esc(ownerLabel(t.id))}</option>`).join("")}</select>
+      <button class="btn btn-sm btn-primary" onclick="devAssign(${sj(devColl)},${sj(x.rec.id)},${sj(x.bucket)},${sj(x.owner)},${sj(sel)})">Reassign</button>
+      <button class="btn btn-sm btn-gray" onclick="devAclModal(${sj(devColl)},${sj(x.rec.id)},${sj(x.bucket)})">Access</button></td></tr>`;
+  }).join("");
+  const audit = devAuditRows().map(a => `<tr><td>${esc(new Date(a.ts || 0).toLocaleString())}</td><td>${esc(ownerLabel(a.actor))}</td><td>${esc(a.what)}</td></tr>`).join("");
+  $("pageBody").innerHTML = `
+    ${devMsg ? `<div class="card" role="status" style="font-size:13px">${esc(devMsg)}</div>` : ""}
+    ${c && c.scopePolicy && c.scopePolicy.invalid ? `<div class="card" style="border-color:var(--red,#b00020);font-size:13px">The stored scope policy is damaged, so everyone is restricted to the safe defaults. Saving any option below replaces it.</div>` : ""}
+    <div class="card"><div class="card-head"><span class="card-title">Global</span></div>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" ${pol.global.superadminAll !== false ? "checked" : ""} onchange="devToggleGlobal(this.checked)"> Superadmins may use the All Data scope</label>
+      <div style="font-size:12px;color:var(--text-muted)">Only the Developer can change this. Policy revision ${esc(String(pol.rev))}.</div></div>
+    <div class="card"><div class="card-head"><span class="card-title">Person</span>
+      <select id="devUserSel" aria-label="Choose a person" onchange="devSelectUser(this.value)">${users.map(x => `<option value="${esc(x.id)}" ${x.id === devSel ? "selected" : ""}>${esc(ownerLabel(x.id))} (${esc(x.role)})</option>`).join("")}<option value="__legacy" ${devSel === "__legacy" ? "selected" : ""}>Legacy / unassigned records</option></select></div></div>
+    ${scopeCard}
+    <div class="card"><div class="card-head"><span class="card-title">Records owned by ${esc(devSel === "__legacy" ? "nobody (legacy)" : ownerLabel(devSel))}</span>
+      <select id="devCollSel" aria-label="Collection" onchange="devSelectColl(this.value)"><option value="transactions" ${devColl === "transactions" ? "selected" : ""}>Payments</option><option value="quotations" ${devColl === "quotations" ? "selected" : ""}>Quotations</option></select></div>
+      <div style="overflow:auto"><table class="tbl"><thead><tr><th>Record</th><th>Access</th><th>Reassign / access</th></tr></thead><tbody>${recRows || `<tr><td colspan="3">No records.</td></tr>`}</tbody></table></div>
+      ${recs.length > 200 ? `<div style="font-size:12px">Showing the first 200 of ${recs.length}.</div>` : ""}</div>
+    <div class="card"><div class="card-head"><span class="card-title">Audit history</span></div>
+      <div style="overflow:auto"><table class="tbl"><thead><tr><th>When</th><th>Who</th><th>What</th></tr></thead><tbody>${audit || `<tr><td colspan="3">No changes recorded yet.</td></tr>`}</tbody></table></div></div>`;
+}
 function renderAdmin(){
   if(!isSuperAdmin()) { activePage = "dashboard"; render(); return; }
   const d = data();
@@ -4897,16 +5143,13 @@ function renderAdmin(){
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px">
       ${DB.users.map(u=>{ 
         let actionBtns = '';
-        if (isSuperAdmin() || (isAdmin() && (u.role !== 'superadmin' || u.id === currentUser.id))) {
+        if (canManageAccount(u)) {
           actionBtns += `<button class="btn btn-sm btn-gray" onclick="userModal(${sj(u.id)})" title="Edit Security Config"><i class="fas fa-cog"></i></button>`;
         }
-        if (isSuperAdmin() && u.id !== currentUser.id) {
+        if (isSuperAdmin() && u.id !== currentUser.id && canManageAccount(u)) {
           actionBtns += `<button class="btn btn-sm btn-amber" onclick="resetUserPin(${sj(u.id)})" title="Reset PIN"><i class="fas fa-key"></i></button>`;
         }
-        if (u.id !== currentUser.id) {
-          if (isSuperAdmin() && u.role !== 'superadmin') actionBtns += `<button class="btn btn-sm btn-red" onclick="delUser(${sj(u.id)})" title="Purge User"><i class="fas fa-trash"></i></button>`;
-          else if (isAdmin() && !isSuperAdmin() && u.role === 'user') actionBtns += `<button class="btn btn-sm btn-red" onclick="delUser(${sj(u.id)})"><i class="fas fa-trash"></i></button>`;
-        }
+        if (canDeleteAccount(u)) actionBtns += `<button class="btn btn-sm btn-red" onclick="delUser(${sj(u.id)})" title="Purge User"><i class="fas fa-trash"></i></button>`;
         
         let linkedName = "Unlinked Access";
         if (u.linkedId) {
@@ -4930,7 +5173,7 @@ function renderAdmin(){
           </div>
           <div style="font-size:.68rem; color:var(--text-muted); font-weight:700; text-transform:uppercase; margin-bottom:12px; display:flex; align-items:center; gap:6px"><i class="fas fa-link"></i> ${esc(linkedName)}</div>
           <div style="padding-top:12px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-             <span class="badge ${u.role==='superadmin'?'bg-red':u.role==='admin'?'bg-green':'bg-gray'}">${u.role.toUpperCase()}</span>
+             <span><span class="badge ${u.role==='developer'?'bg-purple':u.role==='superadmin'?'bg-red':u.role==='admin'?'bg-green':'bg-gray'}">${esc(u.role.toUpperCase())}</span>${u.disabled===true?' <span class="badge bg-amber" title="This account cannot sign in or use data">DISABLED</span>':''}</span>
              <div style="display:flex;gap:6px">${actionBtns}</div>
           </div>
         </div>`; }).join("")}
@@ -4952,7 +5195,8 @@ window.saveAdminSettings=async(btnEl)=>{ DB.settings.appName=$("setName").value.
 window.delUser=id=>{ 
   if(id===currentUser.id){toast("Operation blocked: Cannot delete active session");return;} 
   const target = DB.users.find(u=>u.id===id);
-  if (target.role === 'superadmin') { toast("Operation blocked: Super Admin is protected"); return; }
+  if (target.role === 'developer') { toast("Operation blocked: the Developer account is protected"); return; }
+  if (target.role === 'superadmin' && !isDeveloper()) { toast("Only the Developer can remove a Super Admin"); return; }
   if (target.role === 'admin' && !isSuperAdmin()) { toast("Insufficient clearance to delete Admin"); return; }
   showConfirmModal({
     title:"Purge Account",
@@ -4972,12 +5216,13 @@ window.performDelUser=async id=>{
 
 window.userModal=(id)=>{ 
   const u=id?DB.users.find(x=>x.id===id):null; const p=id?DB.profiles[id]:{};
-  if (u && u.id !== currentUser.id && !isSuperAdmin() && u.role === 'superadmin') { toast("Insufficient clearance for this action."); return; }
+  if (u && !canManageAccount(u)) { toast("Insufficient clearance for this action."); return; }
 
   const d = data();
   const allRoles = Object.keys(DB.permissions);
   let roleOptions = allRoles.map(r => {
-     if (!isSuperAdmin() && r === 'superadmin') return ''; 
+     if (r === 'developer') return ''; // the Developer role is created once by the server-side setup, never from this form
+     if (r === 'superadmin' && !isDeveloper() && !(u && u.role === 'superadmin')) return ''; // only the Developer grants Super Admin
      return `<option value="${r}"${u&&u.role===r?' selected':''}>${r.toUpperCase()}</option>`;
   }).join("");
 
@@ -4990,7 +5235,7 @@ window.userModal=(id)=>{
     <div class="form-group"><label>Display Alias</label><input id="u_name" value="${esc(p.displayName||"")}"></div>
     <div class="form-group"><label>Username</label><input id="u_user" value="${esc(u?u.username:"")}" ${u && !isSuperAdmin() ? "disabled":""}></div>
     <div class="form-group"><label>PIN${u?" (leave blank to keep current)":""}</label><input id="u_pin" inputmode="numeric" maxlength="16" value="" placeholder="${u?'••••':'e.g. 1234'}"></div>
-    <div class="form-group"><label>Security Level (Role)</label><select id="u_role" ${!isSuperAdmin() && u && u.id===currentUser.id ? "disabled" : ""}>${roleOptions}</select></div>
+    <div class="form-group"><label>Security Level (Role)</label><select id="u_role" ${u && (u.id===currentUser.id || (u.role==='superadmin' && !isDeveloper())) ? "disabled" : ""}>${roleOptions}</select></div>
     <div class="form-group"><label>Linked Staff Profile (For Data Scoping)</label><select id="u_link">${linkedOptions}</select></div>
     <div class="modal-btns"><button class="btn btn-gray" onclick="closeModal()">Abort</button><button class="btn btn-primary" onclick='saveUser(${sj(id||"")})'>Execute Provision</button></div>`);
 };
@@ -5004,8 +5249,8 @@ window.saveUser=async id=>{
   if(pin && pin.length<4){ toast("PIN must be at least 4 digits"); return; }
   if(id){ 
     const u=DB.users.find(x=>x.id===id); 
-    if (u.id !== currentUser.id && !isSuperAdmin() && u.role === 'superadmin') { toast("You don't have permission to edit a superadmin account"); return; }
-    if (!isSuperAdmin() && u.id === currentUser.id) role = u.role; 
+    if (!canManageAccount(u)) { toast("You don't have permission to edit this account"); return; }
+    if (u.id === currentUser.id) role = u.role; // nobody changes their own role (the server enforces the same)
     if (isSuperAdmin() && usernameField) {
         if(DB.users.some(x=>x.username===usernameField && x.id!==id)){ toast("Username already taken"); return; }
         u.username = usernameField;

@@ -269,7 +269,20 @@ function withServerControl(submitted, server) {
   return c;
 }
 
-function gateRecordArray(serverArr, mergedArr, ctx, collection, bucket) {
+/** Who a BRAND-NEW record may be owned by. Returns the owner uid to keep, or null to refuse the record.
+ *  The owner must be someone the caller may assign this collection to (ctx.assignable: active, can see the section, inside
+ *  the caller's authority). Shared storage: a missing / ineligible `ownerId` falls back to the creator themself when
+ *  they are eligible (a record is never silently ownerless or "everyone's"). Per-user storage: the bucket IS the owner,
+ *  so an ineligible bucket refuses the record. A ctx without assignable() (hand-built in unit tests) keeps the legacy behaviour. */
+function ownerForNewRecord(rec, ctx, collection, bucket) {
+  if (!ctx || typeof ctx.assignable !== "function") return bucket === null ? (typeof rec.ownerId === "string" ? rec.ownerId : undefined) : bucket;
+  const ok = ctx.assignable(collection);
+  if (bucket !== null) return ok.has(bucket) ? bucket : null;
+  if (typeof rec.ownerId === "string" && ok.has(rec.ownerId)) return rec.ownerId;
+  return typeof ctx.uid === "string" && ok.has(ctx.uid) ? ctx.uid : null;
+}
+
+function gateRecordArray(serverArr, mergedArr, ctx, collection, bucket, knownIds) {
   const sArr = Array.isArray(serverArr) ? serverArr : [];
   const mArr = Array.isArray(mergedArr) ? mergedArr : [];
   const serverIndex = new Map();
@@ -281,8 +294,15 @@ function gateRecordArray(serverArr, mergedArr, ctx, collection, bucket) {
   for (const m of mArr) {
     if (!isPlainObject(m) || m.id == null) { fresh.push(m); continue; }
     if (!serverIndex.has(m.id)) {
+      // An id the server already holds at ANOTHER location (another per-user bucket, or the shared list) is not new: it would
+      // be a copy of an existing record in a different owner's place, i.e. a stale/forged blob trying to rewrite ownership
+      // (ownership moves only through /record/assign). Refused; the real record is untouched.
+      if (knownIds && knownIds.has(m.id)) continue;
       const c = { ...m };
       delete c.acl; // a brand-new record is always INHERIT; the browser cannot create one pre-configured
+      const owned = ownerForNewRecord(c, ctx, collection, bucket);
+      if (owned === null) continue; // not an owner this caller may create records for: dropped, never re-homed
+      if (bucket === null && owned !== undefined) c.ownerId = owned; // shared storage: an invalid / missing owner becomes the CREATOR, never "everyone"
       fresh.push(c);
       continue;
     }
@@ -310,10 +330,20 @@ export function applyRecordAclToSave(merged, serverData, ctx, submitted) {
   const mShared = isPlainObject(merged.shared) ? merged.shared : {};
   const mPerUser = isPlainObject(merged.perUser) ? merged.perUser : {};
 
+  const knownIdsOf = (coll) => {
+    const ids = new Set();
+    const add = (arr) => { if (Array.isArray(arr)) for (const r of arr) if (isPlainObject(r) && r.id != null) ids.add(r.id); };
+    add(serverShared[coll]);
+    for (const b of Object.values(serverPerUser)) if (isPlainObject(b)) add(b[coll]);
+    return ids;
+  };
+  const known = {};
+  for (const coll of ACL_COLLECTIONS) known[coll] = knownIdsOf(coll);
+
   const shared = { ...mShared };
   for (const coll of ACL_COLLECTIONS) {
     const had = Array.isArray(mShared[coll]);
-    const res = gateRecordArray(serverShared[coll], mShared[coll], ctx, coll, null);
+    const res = gateRecordArray(serverShared[coll], mShared[coll], ctx, coll, null, known[coll]);
     if (had || res.length) shared[coll] = res;
   }
 
@@ -327,7 +357,7 @@ export function applyRecordAclToSave(merged, serverData, ctx, submitted) {
     let touched = isPlainObject(mb);
     for (const coll of ACL_COLLECTIONS) {
       const had = isPlainObject(mb) && Array.isArray(mb[coll]);
-      const res = gateRecordArray(isPlainObject(sb) ? sb[coll] : undefined, isPlainObject(mb) ? mb[coll] : undefined, ctx, coll, id);
+      const res = gateRecordArray(isPlainObject(sb) ? sb[coll] : undefined, isPlainObject(mb) ? mb[coll] : undefined, ctx, coll, id, known[coll]);
       if (had || res.length) { copy[coll] = res; touched = true; }
     }
     if (touched) perUser[id] = copy;
@@ -427,7 +457,8 @@ export function canonicalizeGrants(input, serverData, ownerId) {
     const { uid, perms } = g;
     if (typeof uid !== "string" || !uid || uid.length > MAX_UID_LENGTH || seen.has(uid)) return { error: INVALID().error };
     const user = users.get(uid);
-    if (!user || uid === ownerId || user.role === "superadmin") return { error: INVALID().error }; // unknown / owner / superadmin (implicit)
+    // unknown / owner / developer / superadmin (the last two already hold every right implicitly) / a switched-off account
+    if (!user || uid === ownerId || user.role === "superadmin" || user.role === "developer" || user.disabled === true) return { error: INVALID().error };
     if (!Array.isArray(perms) || perms.length < 1 || perms.length > ACL_PERMS.length) return { error: INVALID().error };
     const set = new Set();
     for (const p of perms) {
@@ -442,7 +473,7 @@ export function canonicalizeGrants(input, serverData, ownerId) {
   return { grants: out };
 }
 
-function locate(appData, collection, bucket, id) {
+export function locate(appData, collection, bucket, id) {
   let arr;
   if (bucket === null) {
     arr = isPlainObject(appData.shared) && Array.isArray(appData.shared[collection]) ? appData.shared[collection] : null;

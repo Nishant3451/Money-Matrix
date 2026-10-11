@@ -42,9 +42,11 @@ test("admin cannot grant the superadmin role", () => {
   assert.equal(d.ok, false);
 });
 
-test("superadmin can grant the superadmin role", () => {
-  const d = authorizeSetUserPin({ uid: "sa", role: "superadmin" }, null, { targetUserId: "newu", newPin: "1234", role: "superadmin" });
-  assert.equal(d.ok, true);
+test("ROLE HIERARCHY (supersedes 'superadmin can grant the superadmin role'): only the developer can grant the superadmin role", () => {
+  const bySuper = authorizeSetUserPin({ uid: "sa", role: "superadmin" }, null, { targetUserId: "newu", newPin: "1234", role: "superadmin" });
+  assert.equal(bySuper.ok, false);
+  const byDev = authorizeSetUserPin({ uid: "dv", role: "developer" }, null, { targetUserId: "newu", newPin: "1234", role: "superadmin" });
+  assert.equal(byDev.ok, true);
 });
 
 test("admin cannot edit an existing superadmin account", () => {

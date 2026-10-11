@@ -330,13 +330,16 @@ test("PHASE 6 FIX: an existing superadmin record survives even if a non-superadm
   assert.ok(merged.users.some((u) => u.id === "sa" && u.role === "superadmin"), "superadmin record must not disappear from an admin's save");
 });
 
-test("PHASE 6 FIX: a genuine superadmin caller can still grant superadmin normally via /data/save", () => {
+test("ROLE HIERARCHY (supersedes the old 'superadmin can grant superadmin'): a superadmin caller can no longer grant superadmin via /data/save -- only the Developer can", () => {
   const d = sampleData();
   d.users.push({ id: "adm2", username: "adm2", role: "admin", linkedId: null });
   const submitted = JSON.parse(JSON.stringify(d));
   submitted.users.find((u) => u.id === "adm2").role = "superadmin";
-  const merged = mergeAuthorizedSave(d, submitted, { uid: "sa", role: "superadmin", linkedId: null });
-  assert.equal(merged.users.find((u) => u.id === "adm2").role, "superadmin", "a superadmin caller's own role grants must still work");
+  const bySuper = mergeAuthorizedSave(d, submitted, { uid: "sa", role: "superadmin", linkedId: null });
+  assert.equal(bySuper.users.find((u) => u.id === "adm2").role, "admin", "a superadmin cannot promote anyone to superadmin");
+  d.users.push({ id: "dev", username: "dev", role: "developer", linkedId: null });
+  const byDev = mergeAuthorizedSave(d, submitted, { uid: "dev", role: "developer", linkedId: null });
+  assert.equal(byDev.users.find((u) => u.id === "adm2").role, "superadmin", "the Developer's role grants still work");
 });
 
 test("PHASE 6 FIX: an admin's ordinary (non-role) edits to a non-superadmin user still save normally", () => {

@@ -28,6 +28,8 @@
 // ============================================================================================
 
 import { applyRecordAclToView, applyRecordAclToSave, stampScopedActivityEntry } from "./recordAcl.js";
+import { roleRank, isSuperRole, isFullAccessRole, isActiveUser, ROLE_DEVELOPER, ROLE_SUPERADMIN } from "./roles.js";
+import { effectivePolicyFor, scopePolicyForDeveloper } from "./scopePolicy.js";
 
 /**
  * Walks the supervisor->supervisor chain (verbatim port of getDownlineSupervisorIds in
@@ -39,8 +41,8 @@ export function getDownlineSupervisorIds(rootId, supervisors) {
   let added = true;
   while (added) {
     added = false;
-    (supervisors || []).forEach((s) => {
-      if (s.supervisorId && ids.has(s.supervisorId) && !ids.has(s.id)) {
+    (Array.isArray(supervisors) ? supervisors : []).forEach((s) => {
+      if (s && typeof s === "object" && s.supervisorId && ids.has(s.supervisorId) && !ids.has(s.id)) {
         ids.add(s.id);
         added = true;
       }
@@ -49,9 +51,8 @@ export function getDownlineSupervisorIds(rootId, supervisors) {
   return ids;
 }
 
-export function isFullAccessRole(role) {
-  return role === "superadmin" || role === "admin";
-}
+// developer, superadmin and admin are the "full access" (control-plane) roles -- see roles.js.
+export { isFullAccessRole };
 
 // ---------------------------------------------------------------------------------------------
 // ROLE FRESHNESS. The Worker takes the caller's role from the verified ID token's `role` claim, and
@@ -64,10 +65,8 @@ export function isFullAccessRole(role) {
 // so it is the authoritative current role at zero extra I/O. This is DEMOTE-ONLY by design: when the
 // stored role carries LESS privilege than the token claims, the stored role wins immediately; a stored
 // role never raises privilege above what the token proves (promotions still take effect through a
-// fresh login as before). Privilege order is superadmin > admin > everything else.
+// fresh login as before). Privilege order is developer > superadmin > admin > everything else (roles.js).
 // ---------------------------------------------------------------------------------------------
-const ROLE_RANK = { superadmin: 2, admin: 1 };
-const roleRank = (r) => (hasOwn(ROLE_RANK, r) ? ROLE_RANK[r] : 0);
 export function effectiveRole(tokenRole, storedUser) {
   const stored = storedUser && typeof storedUser.role === "string" && storedUser.role ? storedUser.role : null;
   if (!stored) return tokenRole; // no authoritative record to compare against: unchanged behaviour
@@ -112,8 +111,8 @@ const normalizePerm = (v) => (v === "view" || v === "write" ? v : "hidden");
  */
 export function resolveSectionPerm(data, caller, section) {
   const { uid, role } = caller || {};
-  // Superadmin is unrestricted and cannot be locked out by any override or matrix entry.
-  if (role === "superadmin") return "write";
+  // Developer and superadmin are unrestricted and cannot be locked out by any override or matrix entry.
+  if (isSuperRole(role)) return "write";
   const overrides = data && data.userPermissions;
   if (hasOwn(overrides, uid) && hasOwn(overrides[uid], section) && overrides[uid][section]) {
     return normalizePerm(overrides[uid][section]);
@@ -181,12 +180,16 @@ export function getUplineSupervisorIds(nodeId, supervisors) {
   return chain;
 }
 
-/** @returns {{allowed:string[], defaultScope:string, maxScope:string, owners:Object<string,string[]>, isSuper:boolean}} */
+/** @returns {{allowed:string[], defaultScope:string, maxScope:string, owners:Object<string,string[]>, isSuper:boolean}}
+ *  `isSuper` means "holds All Data": the Developer always, a superadmin unless the Developer-controlled scope policy took
+ *  All Data away from that account (see scopePolicy.js). The policy can only NARROW -- it never adds a scope. */
 export function resolveDataScope(fullData, caller) {
   const { uid, role, linkedId } = caller || {};
   const users = Array.isArray(fullData && fullData.users) ? fullData.users : [];
-  const supervisors = (fullData && fullData.shared && fullData.shared.supervisors) || [];
+  const rawSups = fullData && fullData.shared && fullData.shared.supervisors;
+  const supervisors = Array.isArray(rawSups) ? rawSups : [];
   const validUid = typeof uid === "string" && uid ? uid : null;
+  const policy = effectivePolicyFor(fullData && fullData.scopePolicy, validUid, role);
   let downlineNodes = linkedId ? getDownlineSupervisorIds(linkedId, supervisors) : new Set();
   let ancestors = linkedId ? getUplineSupervisorIds(linkedId, supervisors) : null;
   // Fail closed on a malformed / circular tree: the existing downline walk tolerates a cycle by absorbing the whole
@@ -199,8 +202,9 @@ export function resolveDataScope(fullData, caller) {
   const upline = [];
   for (const u of users) {
     if (!u || typeof u.id !== "string" || u.id === validUid || !u.linkedId) continue;
-    if (downlineNodes.has(u.linkedId)) downline.push(u.id);
-    else if (uplineNodes.has(u.linkedId)) upline.push(u.id);
+    if (u.disabled === true) continue; // a switched-off account is never an eligible scope member
+    if (downlineNodes.has(u.linkedId)) { if (policy.downline) downline.push(u.id); }
+    else if (uplineNodes.has(u.linkedId)) { if (policy.upline) upline.push(u.id); }
   }
   const mine = validUid ? [validUid] : [];
   const uniq = (...lists) => [...new Set(lists.flat())];
@@ -211,7 +215,7 @@ export function resolveDataScope(fullData, caller) {
     upline_downline: uniq(upline, downline),
     mine_upline_downline: uniq(mine, upline, downline),
   };
-  const isSuper = role === "superadmin";
+  const isSuper = isSuperRole(role) && policy.allAllowed;
   const hasUp = upline.length > 0;
   const hasDown = downline.length > 0;
   const allowed = [];
@@ -241,23 +245,81 @@ export function resolveRequestedScope(ds, requested) {
   if (typeof requested !== "string" || !ds.allowed.includes(requested)) return { ok: false };
   return { ok: true, key: requested };
 }
-/** Owner-id Set for a scope key, or null meaning "no owner restriction" (superadmin's "all"). */
+
+/** Per-collection form of the above. `requested` is undefined/null (defaults), ONE string (applies to both Payments and
+ *  Quotations -- the original behaviour), or { transactions?, quotations? } (each independently validated; an omitted key
+ *  gets the default). Anything else, or any key outside `allowed`, is rejected -- never widened.
+ *  @returns {{ok:false}|{ok:true, keys:{transactions:string, quotations:string}}} */
+export function resolveRequestedScopes(ds, requested) {
+  if (isPlainObject(requested)) {
+    const keys = Object.keys(requested);
+    if (keys.some((k) => !SCOPED_COLLECTIONS.includes(k))) return { ok: false };
+    const out = {};
+    for (const coll of SCOPED_COLLECTIONS) {
+      const r = resolveRequestedScope(ds, hasOwn(requested, coll) ? requested[coll] : undefined);
+      if (!r.ok) return { ok: false };
+      out[coll] = r.key;
+    }
+    return { ok: true, keys: out };
+  }
+  const r = resolveRequestedScope(ds, requested);
+  return r.ok ? { ok: true, keys: { transactions: r.key, quotations: r.key } } : { ok: false };
+}
+/** Owner-id Set for a scope key, or null meaning "no owner restriction" (All Data). */
 const ownerSetForScope = (ds, key) => (key === "all" ? null : new Set(ds.owners[key] || []));
 const ownedBy = (rec, owners) => owners === null || (!!rec && typeof rec.ownerId === "string" && owners.has(rec.ownerId));
 
+/**
+ * The server-authorized list of people `caller` may assign a record of `collection` to (the "Assigned To" picker, and the
+ * validation behind both /record/assign and a brand-new record's owner).
+ *   * WRITE on the section is required -- without it the caller cannot create or edit these records at all;
+ *   * All-Data holders (Developer; superadmin unless the policy removed All Data): any ACTIVE user;
+ *     everyone else: themselves or their own mine+downline hierarchy -- never upline, never unrelated users;
+ *   * the target must be active (not disabled) and hold at least "view" on the section, or the record would vanish for them.
+ * @returns {Array<{uid:string, name:string, username:string}>} (no PINs, no hierarchy ids, no roles)
+ */
+export function assignableTargets(appData, caller, collection) {
+  const section = collection === "transactions" ? "marathon" : collection === "quotations" ? "quotations" : null;
+  if (!section || !caller || typeof caller.uid !== "string") return [];
+  if (resolveSectionPerm(appData, caller, section) !== "write") return [];
+  const ds = resolveDataScope(appData, caller);
+  const writeOwners = new Set(ds.owners.mine_downline); // mine + downline (disabled users are never in the downline)
+  const out = [];
+  const seen = new Set();
+  for (const u of Array.isArray(appData && appData.users) ? appData.users : []) {
+    if (!isActiveUser(u) || seen.has(u.id)) continue;
+    seen.add(u.id);
+    if (!ds.isSuper && !writeOwners.has(u.id)) continue;
+    if (resolveSectionPerm(appData, { uid: u.id, role: u.role }, section) === "hidden") continue;
+    const p = appData.profiles && isPlainObject(appData.profiles) && hasOwn(appData.profiles, u.id) && isPlainObject(appData.profiles[u.id]) ? appData.profiles[u.id] : null;
+    const dn = p && typeof p.displayName === "string" && p.displayName.trim() ? p.displayName.trim() : "";
+    out.push({ uid: u.id, name: dn || (typeof u.username === "string" && u.username ? u.username : u.id), username: typeof u.username === "string" ? u.username : u.id });
+  }
+  out.sort((a, b) => (a.name.toLowerCase() < b.name.toLowerCase() ? -1 : a.name.toLowerCase() > b.name.toLowerCase() ? 1 : a.uid < b.uid ? -1 : 1));
+  return out;
+}
+
 /** Everything the record-ACL layer needs to decide for ONE caller, derived only from the verified caller and the
- *  server's own copy of appData (never from the request): Data Scope ceilings + section permissions. */
+ *  server's own copy of appData (never from the request): Data Scope ceilings + section permissions.
+ *  `isSuper` = holds All Data (Developer; superadmin unless the Developer-controlled policy removed it). */
 export function buildRecordAccessContext(fullData, caller) {
   const ds = resolveDataScope(fullData, caller);
+  const targets = {};
   return {
     uid: caller && typeof caller.uid === "string" ? caller.uid : null,
-    isSuper: !!caller && caller.role === "superadmin",
+    isSuper: ds.isSuper,
+    isDeveloper: !!caller && caller.role === ROLE_DEVELOPER,
     isFull: !!caller && isFullAccessRole(caller.role),
     viewOwners: new Set(ds.owners.mine_upline_downline),
     writeOwners: new Set(ds.owners.mine_downline),
     section: {
       transactions: resolveSectionPerm(fullData, caller, "marathon"),
       quotations: resolveSectionPerm(fullData, caller, "quotations"),
+    },
+    /** Set of uids a NEW record of `collection` may be owned by when this caller creates it (memoized). */
+    assignable(collection) {
+      if (!hasOwn(targets, collection)) targets[collection] = new Set(assignableTargets(fullData, caller, collection).map((t) => t.uid));
+      return targets[collection];
     },
   };
 }
@@ -266,39 +328,45 @@ function scopeError() {
   return Object.assign(new Error("Requested data scope is not allowed"), { code: "SCOPE_NOT_ALLOWED" });
 }
 
-/** Applies the data scope to an already section-gated view (copies only; inputs are never mutated). */
-function gateScopeForView(out, fullData, caller, ds, activeKey) {
-  const owners = ownerSetForScope(ds, activeKey);
+/** Applies the data scope to an already section-gated view (copies only; inputs are never mutated). `keys` holds one scope key
+ *  PER collection, so Payments and Quotations are filtered independently. */
+function gateScopeForView(out, fullData, caller, ds, keys) {
+  const ownersBy = {};
+  for (const coll of SCOPED_COLLECTIONS) ownersBy[coll] = ownerSetForScope(ds, keys[coll]);
   const shared = { ...(out.shared || {}) };
   for (const coll of SCOPED_COLLECTIONS) {
-    if (Array.isArray(shared[coll])) shared[coll] = shared[coll].filter((r) => ownedBy(r, owners));
+    if (Array.isArray(shared[coll])) shared[coll] = shared[coll].filter((r) => ownedBy(r, ownersBy[coll]));
   }
   const perUser = {};
   for (const [id, bucket] of Object.entries(out.perUser || {})) {
-    if (!isPlainObject(bucket) || owners === null || owners.has(id)) { perUser[id] = bucket; continue; }
+    if (!isPlainObject(bucket)) { perUser[id] = bucket; continue; }
     const copy = { ...bucket };
-    for (const coll of SCOPED_COLLECTIONS) if (Array.isArray(copy[coll])) copy[coll] = [];
+    for (const coll of SCOPED_COLLECTIONS) {
+      if (Array.isArray(copy[coll]) && ownersBy[coll] !== null && !ownersBy[coll].has(id)) copy[coll] = [];
+    }
     perUser[id] = copy;
   }
   // Non-full callers are only ever sent their OWN bucket. For the scopes that include other people, add the
   // scoped collections (only) of those people's buckets — and only for sections the caller may view.
-  if (owners !== null && !isFullAccessRole(caller.role)) {
+  if (!isFullAccessRole(caller.role)) {
     const fullPerUser = fullData.perUser || {};
-    for (const id of owners) {
+    const everyone = new Set();
+    for (const coll of SCOPED_COLLECTIONS) if (ownersBy[coll] !== null) for (const id of ownersBy[coll]) everyone.add(id);
+    for (const id of everyone) {
       if (hasOwn(perUser, id) || !isPlainObject(fullPerUser[id])) continue;
       const partial = {};
       for (const { permKey, collection } of GATED_SECTIONS) {
         if (!SCOPED_COLLECTIONS.includes(collection)) continue;
-        partial[collection] = canViewSection(fullData, caller, permKey) && Array.isArray(fullPerUser[id][collection]) ? fullPerUser[id][collection] : [];
+        const inScope = ownersBy[collection] !== null && ownersBy[collection].has(id);
+        partial[collection] = inScope && canViewSection(fullData, caller, permKey) && Array.isArray(fullPerUser[id][collection]) ? fullPerUser[id][collection] : [];
       }
       perUser[id] = partial;
     }
   }
   // The activity log names customers of payments/quotations. Entries record an actor DISPLAY NAME (client-written,
   // not an id), so attribution is best-effort and fails closed: keep a payments/quotations entry only when its actor
-  // matches the username or display name of someone whose records are in scope; superadmin "all" keeps everything.
-  let activityLog = out.activityLog;
-  if (owners !== null) {
+  // matches the username or display name of someone whose records are in scope FOR THAT COLLECTION; All Data keeps everything.
+  const actorsFor = (owners) => {
     const actors = new Set();
     for (const u of fullData.users || []) {
       if (u && owners.has(u.id)) {
@@ -307,18 +375,27 @@ function gateScopeForView(out, fullData, caller, ds, activeKey) {
         if (dn) actors.add(dn);
       }
     }
-    // Entries stamped by the server with a verified actorUid are scoped by that uid. Only legacy entries (no actorUid) still fall
-    // back to the name match above, which the record-ACL layer then fails closed on for any collection that uses ACLs.
-    activityLog = (out.activityLog || []).filter(
-      (a) => !a || !SCOPED_COLLECTIONS.includes(a.coll) || (typeof a.actorUid === "string" && a.actorUid ? owners.has(a.actorUid) : actors.has(a.user))
-    );
-  }
+    return actors;
+  };
+  const actorSets = {};
+  for (const coll of SCOPED_COLLECTIONS) if (ownersBy[coll] !== null) actorSets[coll] = actorsFor(ownersBy[coll]);
+  // Entries stamped by the server with a verified actorUid are scoped by that uid. Only legacy entries (no actorUid) still fall
+  // back to the name match above, which the record-ACL layer then fails closed on for any collection that uses ACLs.
+  const activityLog = (out.activityLog || []).filter((a) => {
+    if (!a || !SCOPED_COLLECTIONS.includes(a.coll) || ownersBy[a.coll] === null) return true;
+    return typeof a.actorUid === "string" && a.actorUid ? ownersBy[a.coll].has(a.actorUid) : actorSets[a.coll].has(a.user);
+  });
   return {
     ...out,
     shared,
     perUser,
     activityLog,
-    dataScope: { allowed: ds.allowed, default: ds.defaultScope, max: ds.maxScope, active: activeKey, owners: ds.owners },
+    dataScope: {
+      allowed: ds.allowed, default: ds.defaultScope, max: ds.maxScope,
+      active: keys.transactions, // legacy single value (Payments' key when the two differ; see activeBy)
+      activeBy: { transactions: keys.transactions, quotations: keys.quotations },
+      owners: ds.owners,
+    },
   };
 }
 
@@ -339,8 +416,9 @@ function mergeScopedArrayStable(serverArr, submittedArr, inScope) {
  *  This is what makes it safe that an admin's client only ever HOLDS its in-scope records but a full-access save
  *  otherwise replaces `shared`/`perUser` wholesale. */
 function applyOwnerScopeWriteGate(merged, serverData, caller) {
-  if (caller.role === "superadmin") return merged;
-  const maxOwners = new Set(resolveDataScope(serverData, caller).owners.mine_downline);
+  const wds = resolveDataScope(serverData, caller);
+  if (wds.isSuper) return merged; // All Data (Developer / superadmin): unrestricted by owner; the record-ACL pass still runs
+  const maxOwners = new Set(wds.owners.mine_downline);
   const serverShared = serverData.shared || {};
   const serverPerUser = serverData.perUser || {};
   const shared = { ...(isPlainObject(merged.shared) ? merged.shared : {}) };
@@ -525,11 +603,36 @@ export function buildAuthorizedView(fullData, caller, opts = {}) {
   const sectionGated = gateViewForCaller(out, fullData, caller);
   // Then the data scope (WHOSE records), computed from server data. A requested scope is validated, never widened.
   const ds = resolveDataScope(fullData, caller);
-  const requested = resolveRequestedScope(ds, opts && opts.scope);
+  const requested = resolveRequestedScopes(ds, opts && opts.scope);
   if (!requested.ok) throw scopeError();
-  const scoped = gateScopeForView(sectionGated, fullData, caller, ds, requested.key);
+  const scoped = gateScopeForView(sectionGated, fullData, caller, ds, requested.keys);
   // Record-level ACL: the final, per-record layer. It can only remove records / hide ACL details, never add.
-  return applyRecordAclToView(scoped, fullData, buildRecordAccessContext(fullData, caller));
+  const final = applyRecordAclToView(scoped, fullData, buildRecordAccessContext(fullData, caller));
+  // Descriptor extras (inside dataScope, which the client strips from the data it keeps): the server-authorized "Assigned To"
+  // pickers for the two record types and, for the Developer ONLY, the scope policy and the access audit trails.
+  final.dataScope = { ...final.dataScope, assignTargets: {} };
+  for (const coll of SCOPED_COLLECTIONS) final.dataScope.assignTargets[coll] = assignableTargets(fullData, caller, coll);
+  if (caller.role === ROLE_DEVELOPER) {
+    final.dataScope.control = {
+      scopePolicy: scopePolicyForDeveloper(fullData.scopePolicy),
+      accessAudit: Array.isArray(fullData.accessAudit) ? fullData.accessAudit : [],
+      recordAclAudit: Array.isArray(fullData.recordAclAudit) ? fullData.recordAclAudit : [],
+      // What each account's Data Scope options actually are right now (role + verified hierarchy + the policy above).
+      effective: effectiveScopesForAll(fullData),
+    };
+  }
+  return final;
+}
+
+/** { [uid]: { role, allowed:[...], max } } for every active account -- the Developer console's "effective Data Scope" column. */
+function effectiveScopesForAll(fullData) {
+  const out = {};
+  for (const u of Array.isArray(fullData.users) ? fullData.users : []) {
+    if (!isActiveUser(u) || hasOwn(out, u.id)) continue;
+    const ds = resolveDataScope(fullData, { uid: u.id, role: typeof u.role === "string" ? u.role : "user", linkedId: u.linkedId || null });
+    out[u.id] = { role: u.role, allowed: ds.allowed, max: ds.maxScope };
+  }
+  return out;
 }
 
 export function emptyPerUserBucket() {
@@ -566,15 +669,15 @@ function mergeAuthorizedSaveScoped(serverData, submitted, caller) {
     // let even an admin overwrite the credentials doc (that's a separate document entirely and
     // is never part of appData in the first place).
     return {
-      users: sanitizeUsersForFullAccessSave(serverData.users, submitted.users, role),
+      users: sanitizeUsersForFullAccessSave(serverData.users, submitted.users, role, uid),
       profiles: isPlainObject(submitted.profiles) ? submitted.profiles : serverData.profiles || {},
       settings: isPlainObject(submitted.settings) ? submitted.settings : serverData.settings || {},
       // Access settings are the security policy itself: ONLY a superadmin may change them (the UI
       // already restricts Access Control / Individual Access / Manage Access to superadmin). An
       // admin's submitted copy is ignored, so an admin cannot grant themselves or anyone else access.
-      permissions: role === "superadmin" && isPlainObject(submitted.permissions) ? submitted.permissions : serverData.permissions || {},
+      permissions: isSuperRole(role) && isPlainObject(submitted.permissions) ? submitted.permissions : serverData.permissions || {},
       customSections: Array.isArray(submitted.customSections) ? submitted.customSections : serverData.customSections || [],
-      userPermissions: role === "superadmin" && isPlainObject(submitted.userPermissions) ? submitted.userPermissions : serverData.userPermissions || {},
+      userPermissions: isSuperRole(role) && isPlainObject(submitted.userPermissions) ? submitted.userPermissions : serverData.userPermissions || {},
       shared: isPlainObject(submitted.shared) ? submitted.shared : serverData.shared || {},
       perUser: isPlainObject(submitted.perUser) ? submitted.perUser : serverData.perUser || {},
       activityLog: mergeActivityLog(serverData.activityLog, submitted.activityLog, () => true, uid),
@@ -657,6 +760,10 @@ function privacyPassthrough(serverData) {
     privacyAuditLog: serverData.privacyAuditLog || [],
     // Server-owned audit trail of record-ACL changes (written only by /record/acl).
     recordAclAudit: serverData.recordAclAudit || [],
+    // Server-owned Developer scope policy (written only by /scope/policy) and the audit trail of ownership / policy changes
+    // (written only by /record/assign and /scope/policy). A blob can never carry either.
+    ...(serverData.scopePolicy !== undefined ? { scopePolicy: serverData.scopePolicy } : {}),
+    accessAudit: serverData.accessAudit || [],
   };
 }
 
@@ -745,48 +852,57 @@ function isPlainObject(v) {
 // record, or (b) modify any existing superadmin's record in any way — both silently revert to
 // the server's existing value rather than hard-failing the whole save, consistent with this
 // function's existing "silently drop what you're not authorized to change" convention.
-function sanitizeUsersForFullAccessSave(serverUsers, submittedUsers, callerRole) {
-  serverUsers = Array.isArray(serverUsers) ? serverUsers : [];
-  if (callerRole === "superadmin") {
-    // Superadmin is the top of the hierarchy — no additional restriction beyond "must be an array".
-    return Array.isArray(submittedUsers) ? submittedUsers : serverUsers;
-  }
-  if (!Array.isArray(submittedUsers)) return serverUsers;
+// `disabled` is SERVER-OWNED: a submitted users blob (stale, forged, imported) can neither set nor clear it. Only POST /user/disable
+// (Developer) changes it, so a stale save can never re-enable an account the Developer switched off.
+function withServerDisabled(row, existing) {
+  const out = { ...row };
+  if (existing && existing.disabled === true) out.disabled = true; else delete out.disabled;
+  return out;
+}
 
-  const serverById = new Map(serverUsers.map((u) => [u && u.id, u]));
+function sanitizeUsersForFullAccessSave(serverUsers, submittedUsers, callerRole, callerUid) {
+  serverUsers = Array.isArray(serverUsers) ? serverUsers : [];
+  if (!Array.isArray(submittedUsers)) return serverUsers;
+  const callerRank = roleRank(callerRole);
+  const serverById = new Map();
+  for (const u of serverUsers) if (u && u.id != null && !serverById.has(u.id)) serverById.set(u.id, u);
+
+  // Who may change which row through a blob:
+  //   developer  -> everything BELOW the developer (superadmins included) and its own row (never its role / enabled state)
+  //   superadmin -> admins and users; its OWN row (never its role / enabled state); NOT the developer or other superadmins
+  //   admin      -> users only (unchanged): not the developer or any superadmin
   const result = [];
   const seen = new Set();
-
-  submittedUsers.forEach((u) => {
-    if (!u || u.id == null) return;
+  for (const u of submittedUsers) {
+    if (!u || typeof u !== "object" || u.id == null) continue;
+    if (seen.has(u.id)) continue; // a duplicated id is ambiguous: only the first row counts
     seen.add(u.id);
     const existing = serverById.get(u.id);
-    if (existing && existing.role === "superadmin") {
-      // Existing superadmin record: a plain admin caller may not change it at all — keep the
-      // server's version untouched (mirrors "insufficient clearance to edit a superadmin
-      // account").
-      result.push(existing);
-      return;
+    const isSelf = existing && u.id === callerUid;
+    if (existing && roleRank(existing.role) >= 3) {
+      // The Developer row. Only the Developer may edit it, and even they cannot change its role or disable it.
+      if (callerRole === ROLE_DEVELOPER && isSelf) result.push(withServerDisabled({ ...u, role: ROLE_DEVELOPER }, existing));
+      else result.push(existing);
+      continue;
     }
-    if (u.role === "superadmin") {
-      // Attempt to grant/keep superadmin on a non-superadmin (or brand-new) record — reject just
-      // this role change, falling back to the server's existing role for that record (mirrors
-      // "only superadmin may grant the superadmin role"). For a brand-new record this means it
-      // is dropped to role "user" rather than superadmin, never silently discarded entirely.
-      result.push(existing ? { ...u, role: existing.role } : { ...u, role: "user" });
-      return;
+    if (existing && roleRank(existing.role) === 2 && callerRank < 3) {
+      // An existing superadmin row. Superadmin / admin callers cannot change it. A superadmin's OWN row may carry
+      // profile edits, but its role and enabled state stay put (only the Developer promotes / demotes / disables a superadmin).
+      if (callerRole === ROLE_SUPERADMIN && isSelf) result.push(withServerDisabled({ ...u, role: ROLE_SUPERADMIN }, existing));
+      else result.push(existing);
+      continue;
     }
-    result.push(u);
-  });
-
-  // Any existing user the caller's payload omitted entirely (e.g. a stale/partial client-side
-  // copy) is preserved as-is — the non-privileged branch below already treats omission as
-  // intentional deletion for scoped callers, but the full-access branch has always trusted the
-  // submitted array as the complete list; a superadmin-protected record must never disappear
-  // just because an admin's payload didn't include it.
-  serverUsers.forEach((u) => {
-    if (u && u.role === "superadmin" && !seen.has(u.id)) result.push(u);
-  });
-
+    // From here the row is NOT a protected one. Reject any role the caller may not grant.
+    if (u.role === ROLE_DEVELOPER) { result.push(withServerDisabled(existing ? { ...u, role: existing.role } : { ...u, role: "user" }, existing)); continue; }
+    if (u.role === ROLE_SUPERADMIN && callerRank < 3) { result.push(withServerDisabled(existing ? { ...u, role: existing.role } : { ...u, role: "user" }, existing)); continue; }
+    result.push(withServerDisabled(u, existing));
+  }
+  // Protected rows the caller's payload omitted entirely (a stale / partial client copy) are preserved, never deleted:
+  // the developer row is never deletable through a blob; a superadmin row only by the Developer.
+  for (const u of serverUsers) {
+    if (!u || u.id == null || seen.has(u.id)) continue;
+    const r = roleRank(u.role);
+    if (r >= 3 || (r === 2 && callerRank < 3)) result.push(u);
+  }
   return result;
 }

@@ -148,6 +148,32 @@ What has NOT been run against your live Firebase/Cloudflare accounts:
 5. Confirm a non-admin's `/user/setPin` call for someone else's account is rejected (403), and
    that their own PIN change still works with the correct `currentPin`.
 
+## Developer hierarchy, data scope and the first Developer
+
+Roles: **Developer → Superadmin → Admin → Supervisors/Users.** Only the Developer can create, promote, demote, disable or
+remove Superadmins and change the global scope options (Developer Console in the app). Nobody else can touch the Developer.
+
+### Create the first Developer (one time, no hardcoded credential)
+
+```bash
+npx wrangler secret put DEVELOPER_BOOTSTRAP_TOKEN   # a long random value, at least 24 characters
+npx wrangler deploy
+curl -X POST https://<your-worker>/developer/bootstrap \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"<the token>","username":"<chosen username>","pin":"<8-16 character PIN you choose>"}'
+```
+
+The endpoint is rate-limited per IP and only works while no complete Developer exists (an account row plus a credentials entry
+with role `developer`). Afterwards, delete the secret (`npx wrangler secret delete DEVELOPER_BOOTSTRAP_TOKEN`).
+Recovery if the Developer is lost: remove the Developer entry from the Firestore `moneymatrix/credentials` document and the
+user row from `moneymatrix/appData`, set the secret again and repeat the call.
+
+### New endpoints
+- `POST /record/assign` – move a Payment/Quotation to another eligible person (validated, stale-owner checked, audited).
+- `POST /scope/policy` – Developer only; narrow-only scope options per person plus the global "Superadmins may use All Data" switch.
+- `POST /user/disable` – Developer only; switch an account off/on (`{targetUserId, disabled}`). `disabled` is server-owned: no `/data/save` blob can set or clear it, and the Developer itself cannot be disabled.
+- `POST /developer/bootstrap` – see above.
+
 ## Known limitations (disclosed, not hidden)
 
 **`/data/save` is a read-then-write, not a Firestore transaction.** Two saves landing within the

@@ -41,6 +41,9 @@ import { mintFirebaseCustomToken, setClaimsEnsuringUserExists, deleteAuthUser, r
 import { verifyFirebaseIdToken } from "./lib/firebaseToken.js";
 import { buildAuthorizedView, mergeAuthorizedSave, isFullAccessRole, effectiveRole, buildRecordAccessContext } from "./lib/authorization.js";
 import { computeAclUpdate } from "./lib/recordAcl.js";
+import { computeAssignment } from "./lib/recordAssign.js";
+import { computePolicyUpdate } from "./lib/scopePolicy.js";
+import { ROLE_DEVELOPER } from "./lib/roles.js";
 import { authorizeSetUserPin } from "./lib/userPin.js";
 import {
   PRIVACY_REQUEST_CATEGORIES,
@@ -359,7 +362,8 @@ async function handleLogin(request, env, cors) {
 
     const hashToCheck = entry && entry.pinHash ? entry.pinHash : DUMMY_HASH;
     const compareOk = await bcrypt.compare(pin, hashToCheck);
-    const ok = compareOk && !!user && !!(entry && entry.pinHash);
+    // A switched-off account can never sign in (same generic failure as a wrong PIN: no account probing).
+    const ok = compareOk && !!user && !!(entry && entry.pinHash) && user.disabled !== true;
 
     await finalizeLoginAttempt(env, usernameKey, ip, ok);
 
@@ -369,7 +373,10 @@ async function handleLogin(request, env, cors) {
 
     // entry.role (credentials doc) is only rewritten by /user/setPin; a role-only edit changes users[].role alone.
     // Never mint a role HIGHER than the stored user record's, so re-login after a demotion can't restore it.
-    const role = effectiveRole(entry.role || user.role || "user", user);
+    let role = effectiveRole(entry.role || user.role || "user", user);
+    // The Developer role is minted ONLY when the credentials doc (written by /developer/bootstrap alone) says so; a users[] row
+    // that merely claims "developer" never earns it. Fail closed to an ordinary user.
+    if (role === ROLE_DEVELOPER && entry.role !== ROLE_DEVELOPER) role = "user";
     const claims = { approved: true, role };
 
     await setClaimsEnsuringUserExists(env, accessToken, user.id, claims);
@@ -402,6 +409,7 @@ async function handleDataGet(request, env, cors) {
     const fullData = await readAppData(env, accessToken);
     const me = (fullData.users || []).find((u) => u.id === auth.uid);
     if (!me) return authError("Account not found", 403, cors);
+    if (me.disabled === true) return authError("Account disabled", 403, cors);
     // PART A (server-side hardening): policy acceptance is a prerequisite for USING protected
     // application data, for every authenticated user including superadmin (no role bypass here --
     // contrast resolveSectionPerm's isFullAccessRole bypass in authorization.js, which is a
@@ -474,6 +482,7 @@ async function handleRecordAcl(request, env, cors) {
       const { data: appData, updateTime } = await readAppDataWithVersion(env, accessToken);
       const me = (appData.users || []).find((u) => u.id === auth.uid);
       if (!me) return authError("Account not found", 403, cors);
+      if (me.disabled === true) return authError("Account disabled", 403, cors);
       if (!hasAcceptedAllCurrentPolicies(appData, auth.uid)) return policyAcceptanceRequiredError(cors, appData, auth.uid);
 
       // Role/hierarchy re-derived on EVERY attempt from this attempt's fresh read (role freshness preserved).
@@ -541,6 +550,7 @@ async function handleDataSave(request, env, cors) {
       const { data: serverData, updateTime } = await readAppDataWithVersion(env, accessToken);
       const me = (serverData.users || []).find((u) => u.id === auth.uid);
       if (!me) return authError("Account not found", 403, cors);
+      if (me.disabled === true) return authError("Account disabled", 403, cors);
       // PART A (server-side hardening): same gate as handleDataGet, and for the same reason --
       // /data/save is the other endpoint that directly exposes/mutates protected application
       // data. Checked against serverData (this attempt's freshly-read copy), not any earlier
@@ -655,6 +665,7 @@ async function handleSetUserPin(request, env, cors) {
     // The caller's own stored record (same snapshot) can only DEMOTE the token role — a demoted admin must not
     // keep resetting/deleting other accounts with an old token. If there is no stored record, behaviour is unchanged.
     const callerRecord = (appData.users || []).find((u) => u.id === auth.uid) || null;
+    if (callerRecord && callerRecord.disabled === true) return authError("Account disabled", 403, cors);
     const decision = authorizeSetUserPin({ uid: auth.uid, role: effectiveRole(auth.role, callerRecord) }, targetUser, payload);
     if (!decision.ok) return authError(decision.error, 403, cors);
 
@@ -777,6 +788,7 @@ async function runPrivacyMutation(env, auth, mutate) {
     const { data: appData, updateTime } = await readAppDataWithVersion(env, accessToken);
     const me = (appData.users || []).find((u) => u.id === auth.uid);
     if (!me) return { error: { message: "Account not found", status: 403 } };
+    if (me.disabled === true) return { error: { message: "Account disabled", status: 403 } };
 
     const outcome = await mutate({ appData, me });
     if (outcome.error) return outcome; // validation failure -- never retried, never written
@@ -1180,6 +1192,295 @@ async function handlePrivacyExport(request, env, cors) {
 }
 
 // -------------------------------------------------------------------------------------------
+// POST /record/assign -- the ONLY way a Payment's / Quotation's OWNER changes ("Assigned To").
+//
+// /data/save can never change `ownerId` (applyRecordAclToSave) and in per-user storage a record's owner is the bucket it
+// lives in, so reassignment is a dedicated, validated operation (lib/recordAssign.js). Body: { collection, id,
+// bucket?: <uid> (omit for shared-storage records), expectedOwner: <uid the caller last saw, or null for a legacy unowned
+// record>, targetUid }. Who may assign what, and to whom, is decided from the server's freshly-read appData and the
+// verified caller only; a stale expectedOwner is refused (409) so an old screen cannot overwrite newer ownership.
+// -------------------------------------------------------------------------------------------
+const MAX_RECORD_ASSIGN_BODY_BYTES = 8 * 1024;
+const MAX_RECORD_ASSIGN_WRITES_PER_WINDOW = 60;
+const RECORD_ASSIGN_WINDOW_MS = 60 * 1000;
+
+async function handleRecordAssign(request, env, cors) {
+  const auth = await authenticateRequest(request, env);
+  if (auth.error) return authError(auth.error.message, auth.error.status, cors);
+
+  const read = await readBodyOrRespond(request, MAX_RECORD_ASSIGN_BODY_BYTES, cors);
+  if (read.error) return read.error;
+  const body = read.value;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return authError("Invalid payload", 400, cors);
+  const bucket = body.bucket === undefined || body.bucket === null ? null : body.bucket;
+  if (body.expectedOwner === undefined) return authError("Invalid payload", 400, cors); // omitted != null: never an implicit "legacy" claim
+
+  const rl = await checkAndReserveRateLimit(env, "record_assign", auth.uid, MAX_RECORD_ASSIGN_WRITES_PER_WINDOW, RECORD_ASSIGN_WINDOW_MS);
+  if (rl.misconfigured) {
+    console.error("record/assign rate limiting is misconfigured: RATE_LIMIT_KV binding is missing.");
+    return authError("Assignment is temporarily unavailable -- please try again shortly.", 503, cors);
+  }
+  if (!rl.allowed) return authError("Too many requests -- please try again later.", 429, cors);
+
+  try {
+    const accessToken = await getGoogleAccessToken(env);
+    for (let attempt = 0; attempt < MAX_DATA_SAVE_ATTEMPTS; attempt++) {
+      const { data: appData, updateTime } = await readAppDataWithVersion(env, accessToken);
+      const me = (appData.users || []).find((u) => u.id === auth.uid);
+      if (!me) return authError("Account not found", 403, cors);
+      if (me.disabled === true) return authError("Account disabled", 403, cors);
+      if (!hasAcceptedAllCurrentPolicies(appData, auth.uid)) return policyAcceptanceRequiredError(cors, appData, auth.uid);
+
+      const caller = { uid: auth.uid, role: effectiveRole(auth.role, me), linkedId: me.linkedId || null };
+      const ctx = buildRecordAccessContext(appData, caller);
+      const outcome = computeAssignment({ appData, ctx, caller, collection: body.collection, bucket, id: body.id, expectedOwner: body.expectedOwner, targetUid: body.targetUid });
+      if (outcome.error) {
+        const { status, code, message, ...extra } = outcome.error;
+        return jsonResponse({ error: { message, code, ...extra } }, status, cors);
+      }
+      if (!outcome.result.changed) return jsonResponse({ data: outcome.result }, 200, cors);
+
+      const write = await writeAppDataIfUnchanged(env, accessToken, outcome.appData, updateTime);
+      if (write.conflict) continue;
+      await bumpMeta(env, accessToken);
+      return jsonResponse({ data: outcome.result }, 200, cors);
+    }
+    return jsonResponse({ error: { message: "This change conflicted with another update -- please try again.", code: "CONFLICT" } }, 409, cors);
+  } catch (e) {
+    console.error("record/assign error:", e && e.stack ? e.stack : e);
+    return authError("Could not assign this record", 500, cors);
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// POST /scope/policy -- DEVELOPER ONLY. Sets which Data Scope options an account may use (lib/scopePolicy.js).
+//
+// The policy can only NARROW what a role and the verified hierarchy already allow, and never applies to the Developer.
+// Body: { baseRev, global?: { superadminAll: boolean }, user?: { uid, policy: {upline?,downline?,all?} | null } }.
+// The caller's Developer role is checked against BOTH the verified token and the stored record, on a fresh read.
+// -------------------------------------------------------------------------------------------
+const MAX_SCOPE_POLICY_BODY_BYTES = 8 * 1024;
+const MAX_SCOPE_POLICY_WRITES_PER_WINDOW = 30;
+const SCOPE_POLICY_WINDOW_MS = 60 * 1000;
+const MAX_ACCESS_AUDIT_ENTRIES = 500;
+
+async function handleScopePolicy(request, env, cors) {
+  const auth = await authenticateRequest(request, env);
+  if (auth.error) return authError(auth.error.message, auth.error.status, cors);
+  if (auth.role !== ROLE_DEVELOPER) return authError("Not authorized", 403, cors);
+
+  const read = await readBodyOrRespond(request, MAX_SCOPE_POLICY_BODY_BYTES, cors);
+  if (read.error) return read.error;
+  const body = read.value;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return authError("Invalid payload", 400, cors);
+
+  const rl = await checkAndReserveRateLimit(env, "scope_policy", auth.uid, MAX_SCOPE_POLICY_WRITES_PER_WINDOW, SCOPE_POLICY_WINDOW_MS);
+  if (rl.misconfigured) {
+    console.error("scope/policy rate limiting is misconfigured: RATE_LIMIT_KV binding is missing.");
+    return authError("Scope changes are temporarily unavailable -- please try again shortly.", 503, cors);
+  }
+  if (!rl.allowed) return authError("Too many requests -- please try again later.", 429, cors);
+
+  try {
+    const accessToken = await getGoogleAccessToken(env);
+    for (let attempt = 0; attempt < MAX_DATA_SAVE_ATTEMPTS; attempt++) {
+      const { data: appData, updateTime } = await readAppDataWithVersion(env, accessToken);
+      const me = (appData.users || []).find((u) => u.id === auth.uid);
+      if (!me) return authError("Account not found", 403, cors);
+      if (effectiveRole(auth.role, me) !== ROLE_DEVELOPER) return authError("Not authorized", 403, cors);
+
+      const roleOf = (uid) => {
+        const u = (appData.users || []).find((x) => x && x.id === uid);
+        return u && typeof u.role === "string" ? u.role : u ? "user" : null;
+      };
+      const outcome = computePolicyUpdate(appData.scopePolicy, body, roleOf);
+      if (outcome.error) {
+        const { status, code, message, ...extra } = outcome.error;
+        return jsonResponse({ error: { message, code, ...extra } }, status, cors);
+      }
+      if (!outcome.changed) return jsonResponse({ data: { policy: outcome.policy, changed: false } }, 200, cors);
+
+      const audit = Array.isArray(appData.accessAudit) ? appData.accessAudit : [];
+      const entry = { ts: Date.now(), actor: auth.uid, action: "scope_policy", rev: outcome.policy.rev };
+      if (body.global !== undefined) entry.global = { superadminAll: outcome.policy.global.superadminAll };
+      if (body.user !== undefined) { entry.target = body.user.uid; entry.policy = outcome.policy.users[body.user.uid] || null; }
+      const next = { ...appData, scopePolicy: outcome.policy, accessAudit: [entry, ...audit].slice(0, MAX_ACCESS_AUDIT_ENTRIES) };
+      const write = await writeAppDataIfUnchanged(env, accessToken, next, updateTime);
+      if (write.conflict) continue;
+      await bumpMeta(env, accessToken);
+      return jsonResponse({ data: { policy: outcome.policy, changed: true } }, 200, cors);
+    }
+    return jsonResponse({ error: { message: "This change conflicted with another update -- please try again.", code: "CONFLICT" } }, 409, cors);
+  } catch (e) {
+    console.error("scope/policy error:", e && e.stack ? e.stack : e);
+    return authError("Could not update the scope policy", 500, cors);
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// POST /user/disable -- the Developer switches an account off or on. `disabled` is SERVER-OWNED: no /data/save blob (stale, forged
+// or imported) can set or clear it. Body: { targetUserId, disabled: boolean }. The Developer itself can never be disabled.
+// -------------------------------------------------------------------------------------------
+async function handleUserDisable(request, env, cors) {
+  const auth = await authenticateRequest(request, env);
+  if (auth.error) return authError(auth.error.message, auth.error.status, cors);
+  if (auth.role !== ROLE_DEVELOPER) return authError("Not authorized", 403, cors);
+
+  const read = await readBodyOrRespond(request, MAX_SCOPE_POLICY_BODY_BYTES, cors);
+  if (read.error) return read.error;
+  const body = read.value;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return authError("Invalid payload", 400, cors);
+  const keys = Object.keys(body);
+  if (keys.length !== 2 || !keys.includes("targetUserId") || !keys.includes("disabled") || typeof body.disabled !== "boolean"
+      || typeof body.targetUserId !== "string" || !body.targetUserId || body.targetUserId.length > 128) {
+    return authError("Invalid payload", 400, cors);
+  }
+
+  const rl = await checkAndReserveRateLimit(env, "user_disable", auth.uid, MAX_SCOPE_POLICY_WRITES_PER_WINDOW, SCOPE_POLICY_WINDOW_MS);
+  if (rl.misconfigured) {
+    console.error("user/disable rate limiting is misconfigured: RATE_LIMIT_KV binding is missing.");
+    return authError("Account changes are temporarily unavailable -- please try again shortly.", 503, cors);
+  }
+  if (!rl.allowed) return authError("Too many requests -- please try again later.", 429, cors);
+
+  try {
+    const accessToken = await getGoogleAccessToken(env);
+    for (let attempt = 0; attempt < MAX_DATA_SAVE_ATTEMPTS; attempt++) {
+      const { data: appData, updateTime } = await readAppDataWithVersion(env, accessToken);
+      const users = Array.isArray(appData.users) ? appData.users : [];
+      const me = users.find((u) => u && u.id === auth.uid);
+      if (!me) return authError("Account not found", 403, cors);
+      if (effectiveRole(auth.role, me) !== ROLE_DEVELOPER) return authError("Not authorized", 403, cors);
+      const idx = users.findIndex((u) => u && u.id === body.targetUserId);
+      if (idx < 0) return jsonResponse({ error: { message: "That account does not exist", code: "TARGET_NOT_FOUND" } }, 404, cors);
+      const target = users[idx];
+      if (target.id === auth.uid || target.role === ROLE_DEVELOPER) {
+        return jsonResponse({ error: { message: "The Developer account cannot be disabled", code: "TARGET_DEVELOPER" } }, 403, cors);
+      }
+      if ((target.disabled === true) === body.disabled) return jsonResponse({ data: { id: target.id, disabled: body.disabled, changed: false } }, 200, cors);
+      const nextUsers = users.map((u, i) => {
+        if (i !== idx) return u;
+        const row = { ...u };
+        if (body.disabled) row.disabled = true; else delete row.disabled;
+        return row;
+      });
+      const audit = Array.isArray(appData.accessAudit) ? appData.accessAudit : [];
+      const entry = { ts: Date.now(), actor: auth.uid, action: body.disabled ? "disable_account" : "enable_account", target: target.id };
+      const write = await writeAppDataIfUnchanged(env, accessToken, { ...appData, users: nextUsers, accessAudit: [entry, ...audit].slice(0, MAX_ACCESS_AUDIT_ENTRIES) }, updateTime);
+      if (write.conflict) continue;
+      await bumpMeta(env, accessToken);
+      return jsonResponse({ data: { id: target.id, disabled: body.disabled, changed: true } }, 200, cors);
+    }
+    return jsonResponse({ error: { message: "This change conflicted with another update -- please try again.", code: "CONFLICT" } }, 409, cors);
+  } catch (e) {
+    console.error("user/disable error:", e && e.stack ? e.stack : e);
+    return authError("Could not change this account", 500, cors);
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// POST /developer/bootstrap -- the ONE-TIME creation of the Developer account.
+//
+// There is no built-in Developer PIN. Setup needs a secret that only the person who deploys the Worker holds:
+//     npx wrangler secret put DEVELOPER_BOOTSTRAP_TOKEN        (a long random string; never committed, never returned)
+// plus a PIN the Developer chooses now (8-16 characters) -- stored only as a bcrypt hash in moneymatrix/credentials, exactly
+// like every other account. Body: { token, newPin, username }                      -> creates a NEW Developer account, or
+//       { token, newPin, userId, currentPin }                                      -> promotes an EXISTING account (its current PIN is verified too).
+// It works only while no complete Developer exists (a row with role "developer" AND a credentials entry). Once it has
+// succeeded every further call is refused, so remove the secret afterwards. Rate limited per IP; failures are generic.
+// After setup, change the PIN through the normal Change PIN flow; recover a lost one by redeploying with a new secret only
+// after deleting the Developer's credentials entry in the Firebase console (documented in cloudflare-worker/README.md).
+// -------------------------------------------------------------------------------------------
+const MAX_BOOTSTRAP_BODY_BYTES = 2 * 1024;
+const MIN_DEVELOPER_PIN_LENGTH = 8;
+const MAX_BOOTSTRAP_ATTEMPTS_PER_WINDOW = 5;
+const BOOTSTRAP_WINDOW_MS = 15 * 60 * 1000;
+const MIN_BOOTSTRAP_SECRET_LENGTH = 24;
+
+async function constantTimeEqualStrings(a, b) {
+  const enc = new TextEncoder();
+  const [da, db] = await Promise.all([crypto.subtle.digest("SHA-256", enc.encode(String(a))), crypto.subtle.digest("SHA-256", enc.encode(String(b)))]);
+  const x = new Uint8Array(da), y = new Uint8Array(db);
+  let diff = 0;
+  for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
+  return diff === 0;
+}
+
+function acceptableDeveloperPin(pin) {
+  if (typeof pin !== "string" || pin.length < MIN_DEVELOPER_PIN_LENGTH || pin.length > MAX_PIN_LENGTH) return false;
+  if (new Set(pin).size < 4) return false; // "11111111", "12121212" ...
+  return true;
+}
+
+async function handleDeveloperBootstrap(request, env, cors) {
+  const secret = typeof env.DEVELOPER_BOOTSTRAP_TOKEN === "string" ? env.DEVELOPER_BOOTSTRAP_TOKEN : "";
+  if (secret.length < MIN_BOOTSTRAP_SECRET_LENGTH) return authError("Developer setup is not enabled", 404, cors);
+
+  const read = await readBodyOrRespond(request, MAX_BOOTSTRAP_BODY_BYTES, cors);
+  if (read.error) return read.error;
+  const body = read.value;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return authError("Invalid payload", 400, cors);
+
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  const rl = await checkAndReserveRateLimit(env, "developer_bootstrap", ip, MAX_BOOTSTRAP_ATTEMPTS_PER_WINDOW, BOOTSTRAP_WINDOW_MS);
+  if (rl.misconfigured) return authError("Developer setup is temporarily unavailable.", 503, cors);
+  if (!rl.allowed) return authError("Too many attempts -- please wait and try again.", 429, cors);
+
+  const tokenOk = typeof body.token === "string" && body.token.length <= 512 && (await constantTimeEqualStrings(body.token, secret));
+  if (!tokenOk) return authError("Setup not permitted", 403, cors);
+  if (!acceptableDeveloperPin(body.newPin)) {
+    return authError(`Choose a Developer PIN of ${MIN_DEVELOPER_PIN_LENGTH}-${MAX_PIN_LENGTH} characters that is not a trivial repeat`, 400, cors);
+  }
+
+  try {
+    const accessToken = await getGoogleAccessToken(env);
+    const newHash = await bcrypt.hash(body.newPin, BCRYPT_ROUNDS);
+    for (let attempt = 0; attempt < MAX_DATA_SAVE_ATTEMPTS; attempt++) {
+      const [{ data: appData, updateTime }, credsDoc] = await Promise.all([readAppDataWithVersion(env, accessToken), readCredentials(env, accessToken)]);
+      const users = Array.isArray(appData.users) ? appData.users : [];
+      const existingDev = users.find((u) => u && u.role === ROLE_DEVELOPER) || null;
+      const devCred = existingDev ? credsDoc[existingDev.id] : null;
+      if (existingDev && devCred && devCred.pinHash && devCred.role === ROLE_DEVELOPER) return authError("Developer setup is already complete", 409, cors);
+
+      let target;
+      let nextUsers;
+      if (existingDev) {
+        // A previous attempt wrote the users row but not the credentials: resume it for that same account.
+        target = existingDev;
+        nextUsers = users;
+      } else if (typeof body.userId === "string" && body.userId) {
+        const u = users.find((x) => x && x.id === body.userId);
+        const entry = u ? credsDoc[u.id] : null;
+        const okPin = typeof body.currentPin === "string" && body.currentPin.length <= MAX_PIN_LENGTH && (await bcrypt.compare(body.currentPin, entry && entry.pinHash ? entry.pinHash : DUMMY_HASH));
+        if (!u || !entry || !entry.pinHash || !okPin || u.disabled === true) return authError("Setup not permitted", 403, cors);
+        target = { ...u, role: ROLE_DEVELOPER };
+        nextUsers = users.map((x) => (x === u ? target : x));
+      } else {
+        const username = sanitizeText(body.username, 64);
+        if (!isNonEmptyString(username)) return authError("A username is required", 400, cors);
+        if (users.some((u) => u && typeof u.username === "string" && u.username.toLowerCase() === username.toLowerCase())) return authError("That username is already taken", 409, cors);
+        target = { id: genId("dev"), username, role: ROLE_DEVELOPER, linkedId: null };
+        nextUsers = [...users, target];
+      }
+
+      if (nextUsers !== users) {
+        const write = await writeAppDataIfUnchanged(env, accessToken, { ...appData, users: nextUsers }, updateTime);
+        if (write.conflict) continue; // re-read and re-evaluate from scratch (a concurrent bootstrap may have won)
+      }
+      await writeCredentials(env, accessToken, { [target.id]: { pinHash: newHash, role: ROLE_DEVELOPER } });
+      await setClaimsEnsuringUserExists(env, accessToken, target.id, { approved: true, role: ROLE_DEVELOPER });
+      await revokeRefreshTokens(env, accessToken, target.id); // any earlier session of a promoted account restarts with the new role
+      await bumpMeta(env, accessToken);
+      return jsonResponse({ data: { ok: true, userId: target.id, username: target.username } }, 200, cors);
+    }
+    return authError("This change conflicted with another update -- please try again.", 409, cors);
+  } catch (e) {
+    console.error("developer/bootstrap error:", e && e.stack ? e.stack : e);
+    return authError("Could not complete setup", 500, cors);
+  }
+}
+
+// -------------------------------------------------------------------------------------------
 // Router
 // -------------------------------------------------------------------------------------------
 
@@ -1205,6 +1506,14 @@ export default {
         return handleDataSave(request, env, cors);
       case "/record/acl":
         return handleRecordAcl(request, env, cors);
+      case "/record/assign":
+        return handleRecordAssign(request, env, cors);
+      case "/scope/policy":
+        return handleScopePolicy(request, env, cors);
+      case "/user/disable":
+        return handleUserDisable(request, env, cors);
+      case "/developer/bootstrap":
+        return handleDeveloperBootstrap(request, env, cors);
       case "/user/setPin":
         return handleSetUserPin(request, env, cors);
       case "/privacy/consent":
