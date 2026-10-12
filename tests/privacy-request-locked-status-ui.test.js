@@ -35,10 +35,11 @@ async function boot({ fetchImpl, privacyRequests }) {
   const stubs = `
     const __fbApp={initializeApp:()=>({})};
     const __fbFs={getFirestore:()=>({}),doc:()=>({}),setDoc:async()=>{},onSnapshot:()=>()=>{}};
-    const __fbAuth={getAuth:()=>({currentUser:{getIdToken:async()=>"test-id-token"}}),signInWithCustomToken:async()=>{},onAuthStateChanged:()=>{},signOut:async()=>{},browserSessionPersistence:{},setPersistence:async()=>{}};`;
+    const __authState={currentUser:null};
+    const __fbAuth={getAuth:()=>__authState,signInWithCustomToken:async()=>{},onAuthStateChanged:()=>{},signOut:async()=>{},browserSessionPersistence:{},setPersistence:async()=>{}};`;
   for (const f of ["app", "firestore", "auth"]) mod = mod.replace(`await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-${f}.js")`, f === "app" ? "__fbApp" : f === "firestore" ? "__fbFs" : "__fbAuth");
   mod += `
-    window.__h = { enter(u, extra){ DB = {...DB, users:[u, {id:"alice",username:"alice",role:"user"}], profiles:{[u.id]:{displayName:u.username}}, ...extra}; completeLogin(u); } };`;
+    window.__h = { enter(u, extra){ auth.currentUser={getIdToken:async()=>"test-id-token"}; DB = {...DB, users:[u, {id:"alice",username:"alice",role:"user"}], profiles:{[u.id]:{displayName:u.username}}, ...extra}; completeLogin(u); } };`;
   w.eval(`${stubs}\n(async()=>{\n${mod}\n})().catch(e=>{window.__bootErr=e;});`);
   for (let i = 0; i < 100 && !w.__h; i++) await sleep(20);
   if (w.__bootErr) throw w.__bootErr;

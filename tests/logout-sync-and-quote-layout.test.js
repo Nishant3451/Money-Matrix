@@ -274,6 +274,23 @@ test("source wiring: go('logout') ends the session BEFORE signOut; forceLogout/t
   assert.match(extractFunction(mod, "doLogin"), /beginSession\(\)/);
 });
 
+test("startCloud loads authorized data even when the metadata listener has no initial snapshot", () => {
+  const env = makeEnv(() => Promise.resolve(ok200()));
+  const start = extractFunction(mod, "startCloud");
+  let listener;
+  let fetches = 0;
+  env.ctx.cloudSyncStarted = false;
+  env.ctx.META = {};
+  env.ctx.onSnapshot = (_ref, _options, callback) => { listener = callback; return () => {}; };
+  env.ctx.fetchAuthorizedData = () => { fetches++; };
+  env.run(start);
+  env.ctx.startCloud();
+
+  assert.equal(fetches, 1, "authorized data must load independently of an initial metadata snapshot");
+  listener({ metadata: { hasPendingWrites: false } });
+  assert.equal(fetches, 2, "metadata changes must continue refreshing authorized data");
+});
+
 test("server-side security untouched: the Worker is not changed by this fix and the client still sends the bearer token + policy 403 mapping", () => {
   const src = extractFunction(mod, "callWorkerApi");
   assert.match(src, /Authorization.*Bearer/);
