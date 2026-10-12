@@ -205,6 +205,7 @@ test("policy gate: a POLICY_ACCEPTANCE_REQUIRED response that lands AFTER logout
 
 test("a queued debounced save that fails because the session ended is not reported as 'Save error'", async () => {
   const env = makeEnv(() => Promise.reject(new TypeError("Failed to fetch")));
+  env.run("serverViewReceived = true");
   const p = env.ctx.cloudSave(true);   // immediate push, in flight
   env.run("beginSessionTermination()");
   const r = await p;
@@ -214,6 +215,7 @@ test("a queued debounced save that fails because the session ended is not report
 
 test("a genuine save failure while logged in is still reported", async () => {
   const env = makeEnv(() => Promise.reject(new TypeError("Failed to fetch")));
+  env.run("serverViewReceived = true");
   const r = await env.ctx.cloudSave(true);
   assert.equal(r.ok, false);
   assert.equal(env.bar(), "Save error");

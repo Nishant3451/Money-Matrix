@@ -992,6 +992,12 @@ function save(immediate = false){
 }
 
 function cloudSave(immediate = false){ 
+  // Never upload local/stale DB state before this page has received the authoritative
+  // server-authorized snapshot. Keep mm_dirty=true so the edit can be reconciled after
+  // fetchAuthorizedData() establishes the correct cloud baseline.
+  if(firebaseAvailable && !serverViewReceived){
+    return Promise.resolve({ok:true, deferred:true, waitingForServer:true});
+  }
   if(!firebaseAvailable){ localStorage.setItem("mm_dirty","false"); isDirty=false; setSync(typeof isLocalFileTest !== "undefined" && isLocalFileTest ? "Local file test — cloud sync disabled" : "Local mode — no cloud sync",true); return Promise.resolve({ok:true, offline:true}); }
   if(applyingRemote) return Promise.resolve({ok:true, skipped:true}); 
   clearTimeout(writeTimer); 
@@ -1352,6 +1358,9 @@ window.addEventListener('storage', (e) => {
 function flushPendingSave(){
   if(!firebaseAvailable) return;
   if(sessionEnding) return; // logging out: the token is being revoked, a save now can only fail
+  // Do not let unload/background/autosave upload a stale local cache before the
+  // authoritative /data/get response has established this page's cloud baseline.
+  if(!serverViewReceived) return;
   if(writeTimer || isDirty){
     clearTimeout(writeTimer); writeTimer = null;
     const jsonStr = JSON.stringify(DB);
